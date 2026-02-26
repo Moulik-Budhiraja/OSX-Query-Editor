@@ -125,6 +125,7 @@ final class SelectorQueryService {
             id: index,
             index: index,
             role: role,
+            frame: Self.visibleFrame(for: element),
             name: resultName,
             nameSource: resultNameSource,
             title: title,
@@ -135,6 +136,25 @@ final class SelectorQueryService {
             focused: focused,
             childCount: memoizationContext.children(of: element).count,
             path: path)
+    }
+
+    private static func visibleFrame(for element: Element) -> CGRect? {
+        guard let frame = element.frame()?.standardized else {
+            return nil
+        }
+
+        guard
+            frame.origin.x.isFinite,
+            frame.origin.y.isFinite,
+            frame.size.width.isFinite,
+            frame.size.height.isFinite,
+            frame.size.width > 1,
+            frame.size.height > 1
+        else {
+            return nil
+        }
+
+        return frame
     }
 
     private func performInteraction(

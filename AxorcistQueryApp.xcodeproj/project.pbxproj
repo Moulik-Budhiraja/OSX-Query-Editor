@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0CCD5F4FC9703FB489C67AEB /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 40348D6CDF8F9186B8DF67AC /* Assets.xcassets */; };
 		1957867FE455D5826D491060 /* OXQHighlightedEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55512CD9172F41DEC7B6C1CB /* OXQHighlightedEditor.swift */; };
+		3E687A4659E74B1954C1B21E /* QueryOverlayManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC66BB95D4D05604ACD83B06 /* QueryOverlayManager.swift */; };
 		42334CEE540386D416139F54 /* OXQColorTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5B75D37976A62C6082388C1 /* OXQColorTheme.swift */; };
 		9F5666F586B86C6DBC62576C /* SelectorQueryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0966EDF12059415DBFE59BD4 /* SelectorQueryService.swift */; };
 		B63DF6B79610214F9946FB0E /* WorkbenchViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9262E0926D37D2E613B1D1E /* WorkbenchViewModel.swift */; };
@@ -28,6 +29,7 @@
 		67426E61A9C170E7BF3F4BE7 /* AxorcistQueryApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AxorcistQueryApp.swift; sourceTree = "<group>"; };
 		A5B75D37976A62C6082388C1 /* OXQColorTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OXQColorTheme.swift; sourceTree = "<group>"; };
 		C17AAFA85996D718506AEB3D /* WorkbenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkbenchView.swift; sourceTree = "<group>"; };
+		CC66BB95D4D05604ACD83B06 /* QueryOverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryOverlayManager.swift; sourceTree = "<group>"; };
 		F9262E0926D37D2E613B1D1E /* WorkbenchViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkbenchViewModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -81,6 +83,7 @@
 			isa = PBXGroup;
 			children = (
 				A5B75D37976A62C6082388C1 /* OXQColorTheme.swift */,
+				CC66BB95D4D05604ACD83B06 /* QueryOverlayManager.swift */,
 				0966EDF12059415DBFE59BD4 /* SelectorQueryService.swift */,
 			);
 			path = Services;
@@ -202,6 +205,7 @@
 				42334CEE540386D416139F54 /* OXQColorTheme.swift in Sources */,
 				1957867FE455D5826D491060 /* OXQHighlightedEditor.swift in Sources */,
 				EB5E24723CCD5C787C4B5989 /* QueryModels.swift in Sources */,
+				3E687A4659E74B1954C1B21E /* QueryOverlayManager.swift in Sources */,
 				9F5666F586B86C6DBC62576C /* SelectorQueryService.swift in Sources */,
 				CD0D65BEE3EB23647A6C49A9 /* WorkbenchView.swift in Sources */,
 				B63DF6B79610214F9946FB0E /* WorkbenchViewModel.swift in Sources */,

@@ -56,6 +56,7 @@ struct QueryResultRow: Identifiable {
     let id: Int
     let index: Int
     let role: String
+    let frame: CGRect?
     let name: String
     let nameSource: String?
     let title: String?

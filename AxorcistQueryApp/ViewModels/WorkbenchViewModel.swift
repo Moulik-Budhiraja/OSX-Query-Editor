@@ -9,6 +9,8 @@ final class WorkbenchViewModel: ObservableObject {
     @Published var maxDepthText = ""
     @Published var searchText = ""
     @Published var interactionValue = ""
+    @Published var showResultOverlays = false
+    @Published private(set) var hoveredRowID: QueryResultRow.ID?
 
     @Published private(set) var runningApps: [RunningAppOption] = []
     @Published private(set) var allRows: [QueryResultRow] = []
@@ -21,6 +23,15 @@ final class WorkbenchViewModel: ObservableObject {
     @Published private(set) var hasAXPermission = AXPermissionHelpers.hasAccessibilityPermissions()
 
     private let service = SelectorQueryService()
+    private let overlayManager = QueryOverlayManager()
+    private var listHoveredRowID: QueryResultRow.ID?
+    private var overlayHoveredRowID: QueryResultRow.ID?
+
+    init() {
+        self.overlayManager.onOverlayHoverChanged = { [weak self] rowID in
+            self?.setOverlayHoveredRowID(rowID)
+        }
+    }
 
     var filteredRows: [QueryResultRow] {
         allRows.filter { $0.matches(search: searchText) }
@@ -65,6 +76,17 @@ final class WorkbenchViewModel: ObservableObject {
 
     func chooseRunningApp(_ option: RunningAppOption) {
         appIdentifier = option.selectorToken
+    }
+
+    func setOverlayVisibility(_ visible: Bool) {
+        self.showResultOverlays = visible
+        self.syncOverlays()
+    }
+
+    func setListHoveredRowID(_ rowID: QueryResultRow.ID?) {
+        self.listHoveredRowID = rowID
+        self.updateHoveredRowID()
+        self.overlayManager.setExternalHighlightedRowID(rowID)
     }
 
     func runQuery() {
@@ -133,14 +155,47 @@ final class WorkbenchViewModel: ObservableObject {
     private func apply(result: QueryExecutionResult) {
         self.stats = result.stats
         self.allRows = result.rows
+        self.syncOverlays()
 
         let filtered = self.filteredRows
         if let selectedRowID,
            filtered.contains(where: { $0.id == selectedRowID })
         {
+            self.ensureHoveredRowExists()
             return
         }
         self.selectedRowID = filtered.first?.id
+        self.ensureHoveredRowExists()
+    }
+
+    private func setOverlayHoveredRowID(_ rowID: QueryResultRow.ID?) {
+        self.overlayHoveredRowID = rowID
+        self.updateHoveredRowID()
+    }
+
+    private func updateHoveredRowID() {
+        self.hoveredRowID = self.overlayHoveredRowID ?? self.listHoveredRowID
+    }
+
+    private func ensureHoveredRowExists() {
+        if let listHoveredRowID,
+           !self.allRows.contains(where: { $0.id == listHoveredRowID })
+        {
+            self.listHoveredRowID = nil
+        }
+
+        if let overlayHoveredRowID,
+           !self.allRows.contains(where: { $0.id == overlayHoveredRowID })
+        {
+            self.overlayHoveredRowID = nil
+        }
+
+        self.updateHoveredRowID()
+    }
+
+    private func syncOverlays() {
+        self.overlayManager.setEnabled(self.showResultOverlays, rows: self.allRows)
+        self.overlayManager.setExternalHighlightedRowID(self.listHoveredRowID)
     }
 
     private static func displayName(for app: NSRunningApplication) -> String {

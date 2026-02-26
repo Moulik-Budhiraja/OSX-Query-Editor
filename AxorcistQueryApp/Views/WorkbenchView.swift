@@ -23,6 +23,9 @@ struct WorkbenchView: View {
             model.refreshPermissions()
             model.refreshRunningApps()
         }
+        .onDisappear {
+            model.setOverlayVisibility(false)
+        }
     }
 
     private var topBar: some View {
@@ -112,6 +115,13 @@ struct WorkbenchView: View {
             HStack {
                 Text("Results")
                     .font(.headline)
+                Toggle(
+                    "Show Overlays",
+                    isOn: Binding(
+                        get: { model.showResultOverlays },
+                        set: { model.setOverlayVisibility($0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
                 Spacer()
                 Text("\(model.filteredRows.count) shown")
                     .foregroundStyle(.secondary)
@@ -152,6 +162,13 @@ struct WorkbenchView: View {
                     .font(.system(.body, design: .monospaced))
                     .lineLimit(1)
                     .tag(row.id)
+                    .onHover { inside in
+                        model.setListHoveredRowID(inside ? row.id : nil)
+                    }
+                    .listRowBackground(
+                        row.id == model.hoveredRowID
+                            ? OXQColorTheme.swiftUIColor(forRole: row.role).opacity(0.20)
+                            : Color.clear)
                 }
             }
             .listStyle(.inset(alternatesRowBackgrounds: true))
