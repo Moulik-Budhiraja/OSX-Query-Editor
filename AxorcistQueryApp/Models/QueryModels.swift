@@ -94,6 +94,8 @@ enum QueryWorkbenchError: LocalizedError {
     case missingAppIdentifier
     case missingSelector
     case invalidMaxDepth
+    case selfTargetUnsupported
+    case focusedAppUnavailable
     case applicationNotFound(String)
     case interactionTargetOutOfBounds(index: Int, matchedCount: Int)
     case interactionFailed(action: String, index: Int)
@@ -107,6 +109,10 @@ enum QueryWorkbenchError: LocalizedError {
             return "A selector query is required."
         case .invalidMaxDepth:
             return "Max depth must be greater than 0."
+        case .selfTargetUnsupported:
+            return "Querying Axorcist Query App itself is not supported. Choose another app."
+        case .focusedAppUnavailable:
+            return "Focused app resolved to Axorcist Query App. Focus another app first, then run the query."
         case let .applicationNotFound(identifier):
             return "Could not find a running app for '\(identifier)'."
         case let .interactionTargetOutOfBounds(index, matchedCount):

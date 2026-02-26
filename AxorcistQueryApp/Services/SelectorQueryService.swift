@@ -27,7 +27,7 @@ final class SelectorQueryService {
             throw QueryWorkbenchError.invalidMaxDepth
         }
 
-        guard let root = self.resolveRootElement(appIdentifier: appIdentifier) else {
+        guard let root = try self.resolveRootElement(appIdentifier: appIdentifier) else {
             throw QueryWorkbenchError.applicationNotFound(appIdentifier)
         }
 
@@ -224,20 +224,33 @@ final class SelectorQueryService {
         }
     }
 
-    private func resolveRootElement(appIdentifier: String) -> Element? {
+    private func resolveRootElement(appIdentifier: String) throws -> Element? {
         let normalizedIdentifier = appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentPID = ProcessInfo.processInfo.processIdentifier
 
         if normalizedIdentifier.caseInsensitiveCompare("focused") == .orderedSame,
            let frontmost = RunningApplicationHelper.frontmostApplication
         {
-            return getApplicationElement(for: frontmost.processIdentifier)
+            if frontmost.processIdentifier != currentPID {
+                FocusedApplicationTracker.shared.remember(frontmost)
+                return getApplicationElement(for: frontmost.processIdentifier)
+            }
+
+            if let priorExternal = FocusedApplicationTracker.shared.lastExternalApplication {
+                return getApplicationElement(for: priorExternal.processIdentifier)
+            }
+
+            throw QueryWorkbenchError.focusedAppUnavailable
         }
 
         if let pid = pid_t(normalizedIdentifier) {
-            return getApplicationElement(for: pid)
+            return try self.getApplicationElementRejectingSelf(for: pid)
         }
 
         if let directBundleMatch = getApplicationElement(for: normalizedIdentifier) {
+            if directBundleMatch.pid() == currentPID {
+                throw QueryWorkbenchError.selfTargetUnsupported
+            }
             return directBundleMatch
         }
 
@@ -245,7 +258,7 @@ final class SelectorQueryService {
             return nil
         }
 
-        return getApplicationElement(for: app.processIdentifier)
+        return try self.getApplicationElementRejectingSelf(for: app.processIdentifier)
     }
 
     private func findRunningApplication(matching identifier: String) -> NSRunningApplication? {
@@ -256,6 +269,14 @@ final class SelectorQueryService {
             let nameMatch = app.localizedName?.lowercased() == normalized
             return bundleMatch || nameMatch
         }
+    }
+
+    private func getApplicationElementRejectingSelf(for pid: pid_t) throws -> Element? {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        if pid == currentPID {
+            throw QueryWorkbenchError.selfTargetUnsupported
+        }
+        return getApplicationElement(for: pid)
     }
 
     private static func stringValue(for element: Element, attributeName: String) -> String? {
@@ -484,5 +505,45 @@ final class SelectorQueryService {
             token == "(null)" ||
             token == "<null>" ||
             token == "optional(nil)"
+    }
+}
+
+@MainActor
+private final class FocusedApplicationTracker {
+    static let shared = FocusedApplicationTracker()
+
+    private var activationObserver: NSObjectProtocol?
+    private(set) var lastExternalApplication: NSRunningApplication?
+
+    private init() {
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        if let frontmost = RunningApplicationHelper.frontmostApplication,
+           frontmost.processIdentifier != selfPID
+        {
+            self.lastExternalApplication = frontmost
+        }
+
+        self.activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main)
+        { [weak self] notification in
+            guard
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else {
+                return
+            }
+            Task { @MainActor [weak self] in
+                self?.remember(app)
+            }
+        }
+    }
+
+    func remember(_ app: NSRunningApplication) {
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        guard app.processIdentifier != selfPID, !app.isTerminated else {
+            return
+        }
+        self.lastExternalApplication = app
     }
 }
