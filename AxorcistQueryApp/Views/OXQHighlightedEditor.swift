@@ -72,8 +72,11 @@ struct OXQHighlightedEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
+            guard !isApplying else { return }
             let latest = textView.string
-            parent.text = latest
+            if parent.text != latest {
+                parent.text = latest
+            }
             applyHighlight(to: latest, preserveSelection: true)
         }
 

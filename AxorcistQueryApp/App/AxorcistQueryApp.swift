@@ -7,6 +7,5 @@ struct AxorcistQueryApp: App {
             WorkbenchView()
                 .frame(minWidth: 1120, minHeight: 760)
         }
-        .windowToolbarStyle(.unifiedCompact)
     }
 }
