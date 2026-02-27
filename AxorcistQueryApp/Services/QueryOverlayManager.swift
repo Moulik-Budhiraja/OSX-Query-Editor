@@ -11,10 +11,13 @@ final class QueryOverlayManager {
     private var externalHighlightedRowID: QueryResultRow.ID?
     private var overlayHoveredRowID: QueryResultRow.ID?
     private var tooltipWindow: OverlayTooltipWindow?
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
 
     func setEnabled(_ enabled: Bool, rows: [QueryResultRow]) {
         self.isEnabled = enabled
         if enabled {
+            self.startMouseMonitoringIfNeeded()
             self.update(rows: rows)
         } else {
             self.teardown()
@@ -64,10 +67,10 @@ final class QueryOverlayManager {
         }
 
         if let hoveredID = self.overlayHoveredRowID, self.overlays[hoveredID] == nil {
-            self.overlayHoveredRowID = nil
-            self.onOverlayHoverChanged?(nil)
+            self.setHoveredOverlayRowID(nil)
         }
 
+        self.updateHoveredOverlayFromCurrentMouseLocation()
         self.applyProminenceState()
     }
 
@@ -78,14 +81,10 @@ final class QueryOverlayManager {
 
     private func handleOverlayHover(rowID: QueryResultRow.ID, isHovering: Bool) {
         if isHovering {
-            self.overlayHoveredRowID = rowID
-            self.onOverlayHoverChanged?(rowID)
+            self.setHoveredOverlayRowID(rowID)
         } else if self.overlayHoveredRowID == rowID {
-            self.overlayHoveredRowID = nil
-            self.onOverlayHoverChanged?(nil)
+            self.setHoveredOverlayRowID(nil)
         }
-
-        self.applyProminenceState()
     }
 
     private func applyProminenceState() {
@@ -132,15 +131,71 @@ final class QueryOverlayManager {
     }
 
     private func teardown() {
-        self.overlayHoveredRowID = nil
+        self.setHoveredOverlayRowID(nil)
         self.externalHighlightedRowID = nil
-        self.onOverlayHoverChanged?(nil)
         self.hideTooltip()
+        self.stopMouseMonitoring()
 
         for item in self.overlays.values {
             item.close()
         }
         self.overlays.removeAll()
+    }
+
+    private func setHoveredOverlayRowID(_ rowID: QueryResultRow.ID?) {
+        guard self.overlayHoveredRowID != rowID else { return }
+        self.overlayHoveredRowID = rowID
+        self.onOverlayHoverChanged?(rowID)
+        self.applyProminenceState()
+    }
+
+    private func startMouseMonitoringIfNeeded() {
+        guard self.globalMouseMonitor == nil, self.localMouseMonitor == nil else { return }
+
+        let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        self.globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateHoveredOverlayFromCurrentMouseLocation()
+            }
+        }
+        self.localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.updateHoveredOverlayFromCurrentMouseLocation()
+            }
+            return event
+        }
+    }
+
+    private func stopMouseMonitoring() {
+        if let globalMouseMonitor {
+            NSEvent.removeMonitor(globalMouseMonitor)
+            self.globalMouseMonitor = nil
+        }
+        if let localMouseMonitor {
+            NSEvent.removeMonitor(localMouseMonitor)
+            self.localMouseMonitor = nil
+        }
+    }
+
+    private func updateHoveredOverlayFromCurrentMouseLocation() {
+        guard self.isEnabled, !self.overlays.isEmpty else {
+            self.setHoveredOverlayRowID(nil)
+            return
+        }
+
+        let pointer = NSEvent.mouseLocation
+        let hoveredID = self.overlays
+            .filter { _, item in
+                item.window.frame.insetBy(dx: -1, dy: -1).contains(pointer)
+            }
+            .min { lhs, rhs in
+                let lhsArea = lhs.value.window.frame.width * lhs.value.window.frame.height
+                let rhsArea = rhs.value.window.frame.width * rhs.value.window.frame.height
+                return lhsArea < rhsArea
+            }?
+            .key
+
+        self.setHoveredOverlayRowID(hoveredID)
     }
 
     private static func convertAXFrameToScreenCoordinates(_ frame: CGRect) -> CGRect {
@@ -209,7 +264,7 @@ private final class ResultOverlayWindow: NSPanel {
         self.backgroundColor = .clear
         self.hidesOnDeactivate = false
         self.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
-        self.ignoresMouseEvents = false
+        self.ignoresMouseEvents = true
         self.isMovableByWindowBackground = false
         self.animationBehavior = .none
 
