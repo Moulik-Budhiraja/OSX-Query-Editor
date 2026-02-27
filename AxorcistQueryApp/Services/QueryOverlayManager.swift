@@ -105,7 +105,7 @@ final class QueryOverlayManager {
             self.tooltipWindow = OverlayTooltipWindow()
         }
 
-        let label = item.row.name
+        let label = item.row.resultsDisplayName
         let color = OXQColorTheme.nsColor(forRole: item.row.role)
 
         self.tooltipWindow?.show(

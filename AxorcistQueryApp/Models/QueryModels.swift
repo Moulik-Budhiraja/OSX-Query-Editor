@@ -68,6 +68,22 @@ struct QueryResultRow: Identifiable {
     let childCount: Int?
     let path: String?
 
+    var resultsDisplayName: String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedValue = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard !trimmedValue.isEmpty else { return trimmedName }
+        guard !trimmedName.isEmpty else { return trimmedValue }
+
+        if trimmedValue.count > trimmedName.count,
+           (trimmedValue.contains(trimmedName) || trimmedName.contains(trimmedValue))
+        {
+            return trimmedValue
+        }
+
+        return trimmedName
+    }
+
     func matches(search: String) -> Bool {
         let needle = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !needle.isEmpty else { return true }

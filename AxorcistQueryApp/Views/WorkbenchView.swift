@@ -144,7 +144,7 @@ struct WorkbenchView: View {
                                     : OXQColorTheme.swiftUIColor(forRole: row.role))
                             .frame(width: 130, alignment: .leading)
 
-                        Text(row.name)
+                        Text(row.resultsDisplayName)
                             .frame(minWidth: 160, maxWidth: 220, alignment: .leading)
 
                         Text(row.value ?? "")
