@@ -105,18 +105,7 @@ final class QueryOverlayManager {
             self.tooltipWindow = OverlayTooltipWindow()
         }
 
-        let nameToken: String
-        if !item.row.name.isEmpty {
-            nameToken = item.row.name
-        } else if let title = item.row.title, !title.isEmpty {
-            nameToken = title
-        } else if let identifier = item.row.identifier, !identifier.isEmpty {
-            nameToken = identifier
-        } else {
-            nameToken = "Unnamed"
-        }
-
-        let label = "\(item.row.index). \(item.row.role) - \(nameToken)"
+        let label = "\(item.row.index). \(item.row.role) - \(item.row.name)"
         let clamped = String(label.prefix(120))
         let color = OXQColorTheme.nsColor(forRole: item.row.role)
 
