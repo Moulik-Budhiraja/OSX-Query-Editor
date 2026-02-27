@@ -105,12 +105,11 @@ final class QueryOverlayManager {
             self.tooltipWindow = OverlayTooltipWindow()
         }
 
-        let label = "\(item.row.index). \(item.row.role) - \(item.row.name)"
-        let clamped = String(label.prefix(120))
+        let label = item.row.name
         let color = OXQColorTheme.nsColor(forRole: item.row.role)
 
         self.tooltipWindow?.show(
-            text: clamped,
+            text: label,
             accentColor: color,
             anchorRect: item.window.frame)
     }
