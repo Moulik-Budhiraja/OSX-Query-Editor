@@ -381,9 +381,12 @@ private final class OverlayTooltipWindow: NSPanel {
 
     func show(text: String, accentColor: NSColor, anchorRect: CGRect) {
         self.tooltipView.configure(text: text, accentColor: accentColor)
-        let contentSize = self.tooltipView.fittingSize
-        let width = min(max(contentSize.width, 120), 460)
-        let height = max(contentSize.height, 28)
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
+        ]
+        let measuredWidth = (text as NSString).size(withAttributes: textAttributes).width
+        let width = min(max(ceil(measuredWidth) + 18, 120), 760)
+        let height: CGFloat = 28
 
         let screen = NSScreen.screens.first(where: { $0.frame.intersects(anchorRect) }) ?? NSScreen.main
         let screenFrame = screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
