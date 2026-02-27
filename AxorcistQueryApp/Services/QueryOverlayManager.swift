@@ -145,12 +145,11 @@ final class QueryOverlayManager {
 
     private static func convertAXFrameToScreenCoordinates(_ frame: CGRect) -> CGRect {
         let normalized = frame.standardized
-
-        let rawScore = self.maxIntersectionArea(of: normalized)
-        var bestRect = normalized
-        var bestScore = rawScore
+        var bestRect: CGRect?
+        var bestScore: CGFloat = 0
 
         for screen in NSScreen.screens {
+            // AX frames use top-left origin; AppKit windows use bottom-left origin.
             let candidate = CGRect(
                 x: normalized.origin.x,
                 y: screen.frame.maxY - normalized.origin.y - normalized.size.height,
@@ -164,11 +163,8 @@ final class QueryOverlayManager {
             }
         }
 
-        return bestRect
-    }
-
-    private static func maxIntersectionArea(of rect: CGRect) -> CGFloat {
-        NSScreen.screens.map { self.intersectionArea(rect, with: $0.frame) }.max() ?? 0
+        // Keep a raw fallback for unexpected coordinate systems.
+        return bestRect ?? normalized
     }
 
     private static func intersectionArea(_ lhs: CGRect, with rhs: CGRect) -> CGFloat {
