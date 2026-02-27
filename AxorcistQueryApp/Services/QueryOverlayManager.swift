@@ -7,17 +7,18 @@ final class QueryOverlayManager {
 
     private let maxOverlayCount = 250
     private var isEnabled = false
-    private var overlays: [QueryResultRow.ID: OverlayItem] = [:]
+    private var overlays: [QueryResultRow.ID: OverlayEntry] = [:]
     private var externalHighlightedRowID: QueryResultRow.ID?
-    private var overlayHoveredRowID: QueryResultRow.ID?
+    private var hoveredOverlayRowID: QueryResultRow.ID?
     private var tooltipWindow: OverlayTooltipWindow?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
+    private var hoverRefreshTimer: Timer?
 
     func setEnabled(_ enabled: Bool, rows: [QueryResultRow]) {
         self.isEnabled = enabled
         if enabled {
-            self.startMouseMonitoringIfNeeded()
+            self.startHoverMonitoringIfNeeded()
             self.update(rows: rows)
         } else {
             self.teardown()
@@ -30,9 +31,32 @@ final class QueryOverlayManager {
             return
         }
 
-        let rowsWithFrames = rows.filter { $0.frame != nil }
-        let limitedRows = Array(rowsWithFrames.prefix(self.maxOverlayCount))
-        let activeIDs = Set(limitedRows.map(\.id))
+        let candidates = Array(rows.prefix(self.maxOverlayCount))
+        var activeIDs = Set<QueryResultRow.ID>()
+
+        for row in candidates {
+            guard let frame = row.frame else { continue }
+            let convertedFrame = Self.convertAXFrameToScreen(frame).integral
+            guard convertedFrame.width > 1, convertedFrame.height > 1 else { continue }
+
+            activeIDs.insert(row.id)
+            let roleColor = OXQColorTheme.nsColor(forRole: row.role)
+
+            if let overlay = self.overlays[row.id] {
+                overlay.row = row
+                overlay.view.update(index: row.index, color: roleColor)
+                overlay.window.setFrame(convertedFrame, display: true)
+                overlay.window.orderFrontRegardless()
+            } else {
+                let view = ResultOverlayView(frame: CGRect(origin: .zero, size: convertedFrame.size))
+                view.update(index: row.index, color: roleColor)
+
+                let window = ResultOverlayWindow(contentRect: convertedFrame, overlayView: view)
+                window.orderFrontRegardless()
+
+                self.overlays[row.id] = OverlayEntry(row: row, window: window, view: view)
+            }
+        }
 
         let staleIDs = self.overlays.keys.filter { !activeIDs.contains($0) }
         for staleID in staleIDs {
@@ -40,121 +64,105 @@ final class QueryOverlayManager {
             self.overlays.removeValue(forKey: staleID)
         }
 
-        for row in limitedRows {
-            guard let frame = row.frame else { continue }
-
-            let screenRect = Self.convertAXFrameToScreenCoordinates(frame)
-            let color = OXQColorTheme.nsColor(forRole: row.role)
-
-            if let item = self.overlays[row.id] {
-                item.row = row
-                item.view.update(index: row.index, color: color)
-                item.window.setFrame(screenRect, display: true)
-                item.window.orderFrontRegardless()
-                continue
-            }
-
-            let view = ResultOverlayView(frame: CGRect(origin: .zero, size: screenRect.size))
-            view.update(index: row.index, color: color)
-            view.onHoverChanged = { [weak self] isHovering in
-                self?.handleOverlayHover(rowID: row.id, isHovering: isHovering)
-            }
-
-            let window = ResultOverlayWindow(contentRect: screenRect, overlayView: view)
-            window.orderFrontRegardless()
-
-            self.overlays[row.id] = OverlayItem(row: row, window: window, view: view)
-        }
-
-        if let hoveredID = self.overlayHoveredRowID, self.overlays[hoveredID] == nil {
-            self.setHoveredOverlayRowID(nil)
-        }
-
-        self.updateHoveredOverlayFromCurrentMouseLocation()
-        self.applyProminenceState()
+        self.refreshHoveredOverlayFromPointer()
+        self.applyVisualState()
     }
 
     func setExternalHighlightedRowID(_ rowID: QueryResultRow.ID?) {
         self.externalHighlightedRowID = rowID
-        self.applyProminenceState()
-    }
-
-    private func handleOverlayHover(rowID: QueryResultRow.ID, isHovering: Bool) {
-        if isHovering {
-            self.setHoveredOverlayRowID(rowID)
-        } else if self.overlayHoveredRowID == rowID {
-            self.setHoveredOverlayRowID(nil)
-        }
-    }
-
-    private func applyProminenceState() {
-        let prominentID = self.overlayHoveredRowID ?? self.externalHighlightedRowID
-        for (rowID, item) in self.overlays {
-            item.view.setProminent(rowID == prominentID)
-        }
-
-        if let hoveredID = self.overlayHoveredRowID, let item = self.overlays[hoveredID] {
-            self.showTooltip(for: item)
-        } else {
-            self.hideTooltip()
-        }
-    }
-
-    private func showTooltip(for item: OverlayItem) {
-        if self.tooltipWindow == nil {
-            self.tooltipWindow = OverlayTooltipWindow()
-        }
-
-        let label = item.row.resultsDisplayName
-        let color = OXQColorTheme.nsColor(forRole: item.row.role)
-
-        self.tooltipWindow?.show(
-            text: label,
-            accentColor: color,
-            anchorRect: item.window.frame)
-    }
-
-    private func hideTooltip() {
-        self.tooltipWindow?.orderOut(nil)
-    }
-
-    private func teardown() {
-        self.setHoveredOverlayRowID(nil)
-        self.externalHighlightedRowID = nil
-        self.hideTooltip()
-        self.stopMouseMonitoring()
-
-        for item in self.overlays.values {
-            item.close()
-        }
-        self.overlays.removeAll()
+        self.applyVisualState()
     }
 
     private func setHoveredOverlayRowID(_ rowID: QueryResultRow.ID?) {
-        guard self.overlayHoveredRowID != rowID else { return }
-        self.overlayHoveredRowID = rowID
+        guard self.hoveredOverlayRowID != rowID else { return }
+        self.hoveredOverlayRowID = rowID
         self.onOverlayHoverChanged?(rowID)
-        self.applyProminenceState()
+        self.applyVisualState()
     }
 
-    private func startMouseMonitoringIfNeeded() {
+    private func refreshHoveredOverlayFromPointer() {
+        guard self.isEnabled, !self.overlays.isEmpty else {
+            self.setHoveredOverlayRowID(nil)
+            return
+        }
+
+        let pointer = NSEvent.mouseLocation
+        let hoveredID = self.overlays.values
+            .filter { $0.window.frame.insetBy(dx: -1, dy: -1).contains(pointer) }
+            .min { lhs, rhs in
+                let lhsArea = lhs.window.frame.width * lhs.window.frame.height
+                let rhsArea = rhs.window.frame.width * rhs.window.frame.height
+                if lhsArea == rhsArea {
+                    return lhs.row.index < rhs.row.index
+                }
+                return lhsArea < rhsArea
+            }?
+            .row
+            .id
+
+        self.setHoveredOverlayRowID(hoveredID)
+    }
+
+    private func applyVisualState() {
+        let prominentID = self.hoveredOverlayRowID ?? self.externalHighlightedRowID
+        for entry in self.overlays.values {
+            entry.view.setProminent(entry.row.id == prominentID)
+        }
+
+        guard let hoveredID = self.hoveredOverlayRowID, let hovered = self.overlays[hoveredID] else {
+            self.tooltipWindow?.orderOut(nil)
+            return
+        }
+
+        if self.tooltipWindow == nil {
+            self.tooltipWindow = OverlayTooltipWindow()
+        }
+        self.tooltipWindow?.show(
+            text: hovered.row.resultsDisplayName,
+            accentColor: OXQColorTheme.nsColor(forRole: hovered.row.role),
+            anchorRect: hovered.window.frame)
+    }
+
+    private func startHoverMonitoringIfNeeded() {
         guard self.globalMouseMonitor == nil, self.localMouseMonitor == nil else { return }
 
-        let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
-        self.globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] _ in
+        let trackedEvents: NSEvent.EventTypeMask = [
+            .mouseMoved,
+            .leftMouseDragged,
+            .rightMouseDragged,
+            .otherMouseDragged,
+            .leftMouseDown,
+            .leftMouseUp,
+            .rightMouseDown,
+            .rightMouseUp,
+            .otherMouseDown,
+            .otherMouseUp,
+            .scrollWheel,
+        ]
+
+        self.globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: trackedEvents) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.updateHoveredOverlayFromCurrentMouseLocation()
+                self?.refreshHoveredOverlayFromPointer()
             }
         }
-        self.localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
+
+        self.localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: trackedEvents) { [weak self] event in
             Task { @MainActor [weak self] in
-                self?.updateHoveredOverlayFromCurrentMouseLocation()
+                self?.refreshHoveredOverlayFromPointer()
             }
             return event
         }
+
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshHoveredOverlayFromPointer()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.hoverRefreshTimer = timer
     }
 
-    private func stopMouseMonitoring() {
+    private func stopHoverMonitoring() {
         if let globalMouseMonitor {
             NSEvent.removeMonitor(globalMouseMonitor)
             self.globalMouseMonitor = nil
@@ -163,64 +171,70 @@ final class QueryOverlayManager {
             NSEvent.removeMonitor(localMouseMonitor)
             self.localMouseMonitor = nil
         }
+        self.hoverRefreshTimer?.invalidate()
+        self.hoverRefreshTimer = nil
     }
 
-    private func updateHoveredOverlayFromCurrentMouseLocation() {
-        guard self.isEnabled, !self.overlays.isEmpty else {
-            self.setHoveredOverlayRowID(nil)
-            return
+    private func teardown() {
+        self.stopHoverMonitoring()
+        self.externalHighlightedRowID = nil
+        self.setHoveredOverlayRowID(nil)
+        self.tooltipWindow?.orderOut(nil)
+
+        for entry in self.overlays.values {
+            entry.close()
+        }
+        self.overlays.removeAll()
+    }
+
+    private static func convertAXFrameToScreen(_ frame: CGRect) -> CGRect {
+        let normalized = frame.standardized
+        guard normalized.width.isFinite, normalized.height.isFinite, normalized.minX.isFinite, normalized.minY.isFinite else {
+            return .zero
         }
 
-        let pointer = NSEvent.mouseLocation
-        let hoveredID = self.overlays
-            .filter { _, item in
-                item.window.frame.insetBy(dx: -1, dy: -1).contains(pointer)
-            }
-            .min { lhs, rhs in
-                let lhsArea = lhs.value.window.frame.width * lhs.value.window.frame.height
-                let rhsArea = rhs.value.window.frame.width * rhs.value.window.frame.height
-                return lhsArea < rhsArea
-            }?
-            .key
+        guard let mainScreen = NSScreen.main ?? NSScreen.screens.first else {
+            return normalized
+        }
 
-        self.setHoveredOverlayRowID(hoveredID)
-    }
+        // AX frame origin is top-left based; AppKit global coordinates are bottom-left based.
+        let mainBased = CGRect(
+            x: normalized.minX,
+            y: mainScreen.frame.maxY - normalized.maxY,
+            width: normalized.width,
+            height: normalized.height)
 
-    private static func convertAXFrameToScreenCoordinates(_ frame: CGRect) -> CGRect {
-        let normalized = frame.standardized
-        var bestRect: CGRect?
+        if NSScreen.screens.contains(where: { !$0.frame.intersection(mainBased).isNull }) {
+            return mainBased
+        }
+
+        // Fallback: choose per-screen conversion that intersects a display most.
+        var bestRect = mainBased
         var bestScore: CGFloat = 0
-
         for screen in NSScreen.screens {
-            // AX frames use top-left origin; AppKit windows use bottom-left origin.
             let candidate = CGRect(
-                x: normalized.origin.x,
-                y: screen.frame.maxY - normalized.origin.y - normalized.size.height,
-                width: normalized.size.width,
-                height: normalized.size.height)
-
-            let score = self.intersectionArea(candidate, with: screen.frame)
+                x: normalized.minX,
+                y: screen.frame.maxY - normalized.maxY,
+                width: normalized.width,
+                height: normalized.height)
+            let score = Self.intersectionArea(candidate, with: screen.frame)
             if score > bestScore {
                 bestScore = score
                 bestRect = candidate
             }
         }
-
-        // Keep a raw fallback for unexpected coordinate systems.
-        return bestRect ?? normalized
+        return bestRect
     }
 
     private static func intersectionArea(_ lhs: CGRect, with rhs: CGRect) -> CGFloat {
         let intersection = lhs.intersection(rhs)
-        guard !intersection.isNull, !intersection.isInfinite else {
-            return 0
-        }
+        guard !intersection.isNull, !intersection.isInfinite else { return 0 }
         return max(0, intersection.width) * max(0, intersection.height)
     }
 }
 
 @MainActor
-private final class OverlayItem {
+private final class OverlayEntry {
     var row: QueryResultRow
     let window: ResultOverlayWindow
     let view: ResultOverlayView
@@ -267,12 +281,9 @@ private final class ResultOverlayWindow: NSPanel {
 
 @MainActor
 private final class ResultOverlayView: NSView {
-    var onHoverChanged: ((Bool) -> Void)?
-
     private var roleColor = NSColor.systemBlue
     private var index = 0
     private var isProminent = false
-    private var tracking: NSTrackingArea?
 
     override var wantsUpdateLayer: Bool { false }
 
@@ -288,58 +299,32 @@ private final class ResultOverlayView: NSView {
         self.needsDisplay = true
     }
 
-    override func updateTrackingAreas() {
-        if let tracking {
-            self.removeTrackingArea(tracking)
-        }
-
-        let options: NSTrackingArea.Options = [
-            .mouseEnteredAndExited,
-            .activeAlways,
-            .inVisibleRect,
-        ]
-        let tracking = NSTrackingArea(rect: self.bounds, options: options, owner: self, userInfo: nil)
-        self.addTrackingArea(tracking)
-        self.tracking = tracking
-
-        super.updateTrackingAreas()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        self.onHoverChanged?(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        self.onHoverChanged?(false)
-    }
-
     override func draw(_ dirtyRect: NSRect) {
-        let highlightStrength: CGFloat = self.isProminent ? 1 : 0
-        let fillAlpha = 0.11 + (0.16 * highlightStrength)
-        let strokeAlpha = 0.55 + (0.35 * highlightStrength)
-        let lineWidth = 1.7 + (1.1 * highlightStrength)
+        let prominence: CGFloat = self.isProminent ? 1 : 0
+        let fillAlpha = 0.12 + (0.14 * prominence)
+        let strokeAlpha = 0.58 + (0.30 * prominence)
+        let lineWidth = 1.6 + (1.2 * prominence)
 
-        let rect = self.bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
-        let rounded = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        let frameRect = self.bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
+        let rounded = NSBezierPath(roundedRect: frameRect, xRadius: 7, yRadius: 7)
+
         self.roleColor.withAlphaComponent(fillAlpha).setFill()
         rounded.fill()
-
         self.roleColor.withAlphaComponent(strokeAlpha).setStroke()
         rounded.lineWidth = lineWidth
         rounded.stroke()
 
         let badgeText = "\(self.index)" as NSString
-        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
         let textAttrs: [NSAttributedString.Key: Any] = [
-            .font: font,
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
             .foregroundColor: NSColor.white,
         ]
-        let badgeSize = badgeText.size(withAttributes: textAttrs)
+        let textSize = badgeText.size(withAttributes: textAttrs)
         let badgeRect = NSRect(
-            x: rect.minX + 7,
-            y: rect.maxY - badgeSize.height - 10,
-            width: badgeSize.width + 12,
-            height: badgeSize.height + 4)
+            x: frameRect.minX + 8,
+            y: frameRect.maxY - textSize.height - 10,
+            width: textSize.width + 12,
+            height: textSize.height + 4)
 
         let badgePath = NSBezierPath(roundedRect: badgeRect, xRadius: 6, yRadius: 6)
         self.roleColor.withAlphaComponent(0.92).setFill()
@@ -348,8 +333,8 @@ private final class ResultOverlayView: NSView {
         let textRect = NSRect(
             x: badgeRect.minX + 6,
             y: badgeRect.minY + 2,
-            width: badgeSize.width,
-            height: badgeSize.height)
+            width: textSize.width,
+            height: textSize.height)
         badgeText.draw(in: textRect, withAttributes: textAttrs)
     }
 }
@@ -380,29 +365,20 @@ private final class OverlayTooltipWindow: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func show(text: String, accentColor: NSColor, anchorRect: CGRect) {
-        self.tooltipView.configure(text: text, accentColor: accentColor)
-        let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
-        ]
-        let measuredWidth = (text as NSString).size(withAttributes: textAttributes).width
-        let width = min(max(ceil(measuredWidth) + 18, 120), 760)
-        let height: CGFloat = 28
-
         let screen = NSScreen.screens.first(where: { $0.frame.intersects(anchorRect) }) ?? NSScreen.main
         let screenFrame = screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
+        let maxWidth = max(120, screenFrame.width - 12)
+        let size = self.tooltipView.measure(text: text, maxWidth: maxWidth)
 
         var originX = anchorRect.minX
-        var originY = anchorRect.minY - height - 6
-
+        var originY = anchorRect.minY - size.height - 6
         if originY < screenFrame.minY + 4 {
             originY = anchorRect.maxY + 6
         }
+        originX = min(max(originX, screenFrame.minX + 4), screenFrame.maxX - size.width - 4)
 
-        originX = min(max(originX, screenFrame.minX + 4), screenFrame.maxX - width - 4)
-
-        self.setFrame(
-            CGRect(x: originX, y: originY, width: width, height: height),
-            display: true)
+        self.tooltipView.configure(text: text, accentColor: accentColor)
+        self.setFrame(CGRect(x: originX, y: originY, width: size.width, height: size.height), display: true)
         self.orderFrontRegardless()
     }
 }
@@ -412,40 +388,52 @@ private final class OverlayTooltipView: NSView {
     private var text = ""
     private var accentColor = NSColor.systemBlue
 
+    private let horizontalPadding: CGFloat = 9
+    private let verticalPadding: CGFloat = 7
+    private let cornerRadius: CGFloat = 7
+
     override var isFlipped: Bool { true }
 
     func configure(text: String, accentColor: NSColor) {
         self.text = text
         self.accentColor = accentColor
-        self.invalidateIntrinsicContentSize()
         self.needsDisplay = true
     }
 
-    override var intrinsicContentSize: NSSize {
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)]
-        let measured = (self.text as NSString).size(withAttributes: attrs)
-        return NSSize(width: measured.width + 18, height: 28)
+    func measure(text: String, maxWidth: CGFloat) -> CGSize {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
+        ]
+        let measured = (text as NSString).size(withAttributes: attrs)
+        let width = min(max(ceil(measured.width) + (self.horizontalPadding * 2), 120), maxWidth)
+        let height = max(28, ceil(measured.height) + (self.verticalPadding * 2))
+        return CGSize(width: width, height: height)
     }
 
     override func draw(_ dirtyRect: NSRect) {
         let bounds = self.bounds.insetBy(dx: 0.5, dy: 0.5)
-        let background = NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7)
+        let backgroundPath = NSBezierPath(roundedRect: bounds, xRadius: self.cornerRadius, yRadius: self.cornerRadius)
+
         NSColor.black.withAlphaComponent(0.78).setFill()
-        background.fill()
-
+        backgroundPath.fill()
         self.accentColor.withAlphaComponent(0.75).setStroke()
-        background.lineWidth = 1.1
-        background.stroke()
+        backgroundPath.lineWidth = 1.1
+        backgroundPath.stroke()
 
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
         let textAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
             .foregroundColor: NSColor.white,
+            .paragraphStyle: paragraph,
         ]
+
         let textRect = NSRect(
-            x: 9,
-            y: 7,
-            width: max(0, bounds.width - 18),
-            height: max(0, bounds.height - 14))
+            x: self.horizontalPadding,
+            y: self.verticalPadding,
+            width: max(0, bounds.width - (self.horizontalPadding * 2)),
+            height: max(0, bounds.height - (self.verticalPadding * 2)))
+
         (self.text as NSString).draw(in: textRect, withAttributes: textAttrs)
     }
 }
