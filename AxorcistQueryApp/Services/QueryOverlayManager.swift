@@ -198,31 +198,24 @@ final class QueryOverlayManager {
             return normalized
         }
 
-        // AX geometry is top-left relative to the global desktop; AppKit uses bottom-left.
-        let desktopBounds = screens
-            .map(\.frame)
-            .reduce(CGRect.null) { partial, next in
-                partial.isNull ? next : partial.union(next)
-            }
+        // AX geometry is top-left based. Use a stable reference screen rather than NSScreen.main,
+        // which can change when this app window is moved between monitors.
+        let referenceScreen = screens.first(where: { screen in
+            abs(screen.frame.minX) < 0.5 && abs(screen.frame.minY) < 0.5
+        }) ?? screens[0]
 
-        let desktopBased = CGRect(
+        let referenceBased = CGRect(
             x: normalized.minX,
-            y: desktopBounds.maxY - normalized.maxY,
+            y: referenceScreen.frame.maxY - normalized.maxY,
             width: normalized.width,
             height: normalized.height)
 
-        // Primary path for multi-display setups.
-        if screens.contains(where: { !$0.frame.intersection(desktopBased).isNull }) {
-            return desktopBased
+        if screens.contains(where: { !$0.frame.intersection(referenceBased).isNull }) {
+            return referenceBased
         }
 
-        // If incoming frame is already in AppKit space, prefer it when it intersects a display.
-        if screens.contains(where: { !$0.frame.intersection(normalized).isNull }) {
-            return normalized
-        }
-
-        // Last resort: evaluate multiple conversions and choose the one that intersects a screen most.
-        var candidates = [desktopBased, normalized]
+        // Fallback: evaluate per-screen conversions and choose the one that intersects most.
+        var candidates = [referenceBased]
         candidates.append(contentsOf: screens.map { screen in
             CGRect(
                 x: normalized.minX,
@@ -231,7 +224,7 @@ final class QueryOverlayManager {
                 height: normalized.height)
         })
 
-        var bestRect = desktopBased
+        var bestRect = referenceBased
         var bestScore: CGFloat = 0
         for candidate in candidates {
             for screen in screens {
@@ -242,6 +235,16 @@ final class QueryOverlayManager {
                 }
             }
         }
+
+        if bestScore > 0 {
+            return bestRect
+        }
+
+        // If AX coordinates were already AppKit-space for this element, keep them as-is.
+        if screens.contains(where: { !$0.frame.intersection(normalized).isNull }) {
+            return normalized
+        }
+
         return bestRect
     }
 
