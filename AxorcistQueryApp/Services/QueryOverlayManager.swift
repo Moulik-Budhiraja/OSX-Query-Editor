@@ -193,34 +193,53 @@ final class QueryOverlayManager {
             return .zero
         }
 
-        guard let mainScreen = NSScreen.main ?? NSScreen.screens.first else {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else {
             return normalized
         }
 
-        // AX frame origin is top-left based; AppKit global coordinates are bottom-left based.
-        let mainBased = CGRect(
+        // AX geometry is top-left relative to the global desktop; AppKit uses bottom-left.
+        let desktopBounds = screens
+            .map(\.frame)
+            .reduce(CGRect.null) { partial, next in
+                partial.isNull ? next : partial.union(next)
+            }
+
+        let desktopBased = CGRect(
             x: normalized.minX,
-            y: mainScreen.frame.maxY - normalized.maxY,
+            y: desktopBounds.maxY - normalized.maxY,
             width: normalized.width,
             height: normalized.height)
 
-        if NSScreen.screens.contains(where: { !$0.frame.intersection(mainBased).isNull }) {
-            return mainBased
+        // Primary path for multi-display setups.
+        if screens.contains(where: { !$0.frame.intersection(desktopBased).isNull }) {
+            return desktopBased
         }
 
-        // Fallback: choose per-screen conversion that intersects a display most.
-        var bestRect = mainBased
-        var bestScore: CGFloat = 0
-        for screen in NSScreen.screens {
-            let candidate = CGRect(
+        // If incoming frame is already in AppKit space, prefer it when it intersects a display.
+        if screens.contains(where: { !$0.frame.intersection(normalized).isNull }) {
+            return normalized
+        }
+
+        // Last resort: evaluate multiple conversions and choose the one that intersects a screen most.
+        var candidates = [desktopBased, normalized]
+        candidates.append(contentsOf: screens.map { screen in
+            CGRect(
                 x: normalized.minX,
                 y: screen.frame.maxY - normalized.maxY,
                 width: normalized.width,
                 height: normalized.height)
-            let score = Self.intersectionArea(candidate, with: screen.frame)
-            if score > bestScore {
-                bestScore = score
-                bestRect = candidate
+        })
+
+        var bestRect = desktopBased
+        var bestScore: CGFloat = 0
+        for candidate in candidates {
+            for screen in screens {
+                let score = Self.intersectionArea(candidate, with: screen.frame)
+                if score > bestScore {
+                    bestScore = score
+                    bestRect = candidate
+                }
             }
         }
         return bestRect
