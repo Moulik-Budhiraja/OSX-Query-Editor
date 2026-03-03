@@ -130,79 +130,50 @@ struct WorkbenchView: View {
             TextField("Filter results", text: $model.searchText)
                 .textFieldStyle(.roundedBorder)
 
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(model.filteredRows.enumerated()), id: \.element.id) { offset, row in
-                        resultRow(row, offset: offset)
+            List(selection: $model.selectedRowID) {
+                ForEach(model.filteredRows) { row in
+                    HStack(spacing: 10) {
+                        Text(String(format: "%4d", row.index))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 44, alignment: .trailing)
+
+                        Text(row.role)
+                            .foregroundStyle(
+                                row.id == model.selectedRowID
+                                    ? Color.primary
+                                    : OXQColorTheme.swiftUIColor(forRole: row.role))
+                            .frame(width: 130, alignment: .leading)
+
+                        Text(row.resultsDisplayName)
+                            .frame(minWidth: 160, maxWidth: 220, alignment: .leading)
+
+                        Text(row.value ?? "")
+                            .frame(minWidth: 120, maxWidth: 200, alignment: .leading)
+
+                        Text(row.identifier ?? "")
+                            .frame(minWidth: 120, maxWidth: 180, alignment: .leading)
+
+                        Text(row.focused == true ? "F" : "")
+                            .frame(width: 18, alignment: .center)
+
+                        Text(row.enabled == true ? "E" : (row.enabled == false ? "D" : ""))
+                            .frame(width: 18, alignment: .center)
                     }
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .tag(row.id)
+                    .onHover { inside in
+                        model.setListHoveredRowID(inside ? row.id : nil)
+                    }
+                    .listRowBackground(
+                        row.id == model.hoveredRowID
+                            ? OXQColorTheme.swiftUIColor(forRole: row.role).opacity(0.20)
+                            : Color.clear)
                 }
             }
-            .background(Color(nsColor: .textBackgroundColor))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1))
-            .onHover { inside in
-                if !inside {
-                    model.clearListHover()
-                }
-            }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
         }
         .padding(14)
-    }
-
-    @ViewBuilder
-    private func resultRow(_ row: QueryResultRow, offset: Int) -> some View {
-        HStack(spacing: 10) {
-            Text("\(row.index)")
-                .foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .trailing)
-
-            Text(row.role)
-                .foregroundStyle(
-                    row.id == model.selectedRowID
-                        ? Color.primary
-                        : OXQColorTheme.swiftUIColor(forRole: row.role))
-                .frame(width: 130, alignment: .leading)
-
-            Text(row.resultsDisplayName)
-                .frame(minWidth: 160, maxWidth: 220, alignment: .leading)
-
-            Text(row.value ?? "")
-                .frame(minWidth: 120, maxWidth: 200, alignment: .leading)
-
-            Text(row.identifier ?? "")
-                .frame(minWidth: 120, maxWidth: 180, alignment: .leading)
-
-            Text(row.focused == true ? "F" : "")
-                .frame(width: 18, alignment: .center)
-
-            Text(row.enabled == true ? "E" : (row.enabled == false ? "D" : ""))
-                .frame(width: 18, alignment: .center)
-        }
-        .font(.system(.body, design: .monospaced))
-        .lineLimit(1)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .background(self.backgroundColor(for: row, offset: offset))
-        .onTapGesture {
-            model.selectedRowID = row.id
-        }
-        .onHover { inside in
-            model.setListHover(rowID: row.id, inside: inside)
-        }
-    }
-
-    private func backgroundColor(for row: QueryResultRow, offset: Int) -> Color {
-        if row.id == model.hoveredRowID {
-            return OXQColorTheme.swiftUIColor(forRole: row.role).opacity(0.20)
-        }
-        if row.id == model.selectedRowID {
-            return Color.accentColor.opacity(0.14)
-        }
-        return offset.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.03)
     }
 
     private var rightPane: some View {

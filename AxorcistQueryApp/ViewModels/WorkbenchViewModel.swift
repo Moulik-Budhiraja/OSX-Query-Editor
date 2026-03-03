@@ -28,7 +28,6 @@ final class WorkbenchViewModel: ObservableObject {
     private var overlayHoveredRowID: QueryResultRow.ID?
 
     init() {
-        TemporaryTelemetry.shared.log(category: "viewmodel", message: "init")
         self.overlayManager.onOverlayHoverChanged = { [weak self] rowID in
             self?.setOverlayHoveredRowID(rowID)
         }
@@ -81,49 +80,13 @@ final class WorkbenchViewModel: ObservableObject {
 
     func setOverlayVisibility(_ visible: Bool) {
         self.showResultOverlays = visible
-        TemporaryTelemetry.shared.log(
-            category: "overlay",
-            message: "set_visibility",
-            metadata: [
-                "visible": visible ? "true" : "false",
-                "rows": String(self.allRows.count),
-            ])
         self.syncOverlays()
     }
 
-    func setListHover(rowID: QueryResultRow.ID, inside: Bool) {
-        if inside {
-            guard self.listHoveredRowID != rowID else { return }
-            self.listHoveredRowID = rowID
-            TemporaryTelemetry.shared.log(
-                category: "hover",
-                message: "list_enter",
-                metadata: [
-                    "row": String(rowID),
-                    "selected": self.selectedRowID.map { "\($0)" } ?? "nil",
-                ])
-        } else {
-            // Ignore stale leave events from rows that are no longer the active hover target.
-            guard self.listHoveredRowID == rowID else { return }
-            self.listHoveredRowID = nil
-            TemporaryTelemetry.shared.log(
-                category: "hover",
-                message: "list_leave",
-                metadata: ["row": String(rowID)])
-        }
+    func setListHoveredRowID(_ rowID: QueryResultRow.ID?) {
+        self.listHoveredRowID = rowID
         self.updateHoveredRowID()
-        self.overlayManager.setExternalHighlightedRowID(self.listHoveredRowID)
-    }
-
-    func clearListHover() {
-        guard self.listHoveredRowID != nil else { return }
-        TemporaryTelemetry.shared.log(
-            category: "hover",
-            message: "list_clear",
-            metadata: ["row": self.listHoveredRowID.map { "\($0)" } ?? "nil"])
-        self.listHoveredRowID = nil
-        self.updateHoveredRowID()
-        self.overlayManager.setExternalHighlightedRowID(nil)
+        self.overlayManager.setExternalHighlightedRowID(rowID)
     }
 
     func runQuery() {
@@ -206,15 +169,6 @@ final class WorkbenchViewModel: ObservableObject {
     }
 
     private func setOverlayHoveredRowID(_ rowID: QueryResultRow.ID?) {
-        if self.overlayHoveredRowID != rowID {
-            TemporaryTelemetry.shared.log(
-                category: "hover",
-                message: "overlay_hover_changed",
-                metadata: [
-                    "from": self.overlayHoveredRowID.map { "\($0)" } ?? "nil",
-                    "to": rowID.map { "\($0)" } ?? "nil",
-                ])
-        }
         self.overlayHoveredRowID = rowID
         self.updateHoveredRowID()
     }
