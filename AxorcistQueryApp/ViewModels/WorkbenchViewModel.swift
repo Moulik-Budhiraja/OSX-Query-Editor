@@ -96,6 +96,13 @@ final class WorkbenchViewModel: ObservableObject {
         self.overlayManager.setExternalHighlightedRowID(self.listHoveredRowID)
     }
 
+    func clearListHover() {
+        guard self.listHoveredRowID != nil else { return }
+        self.listHoveredRowID = nil
+        self.updateHoveredRowID()
+        self.overlayManager.setExternalHighlightedRowID(nil)
+    }
+
     func runQuery() {
         do {
             let request = try self.makeRequest()
