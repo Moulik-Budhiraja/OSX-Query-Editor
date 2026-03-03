@@ -16,6 +16,13 @@ final class QueryOverlayManager {
     private var isRefreshingHover = false
 
     func setEnabled(_ enabled: Bool, rows: [QueryResultRow]) {
+        TemporaryTelemetry.shared.log(
+            category: "overlay",
+            message: "set_enabled",
+            metadata: [
+                "enabled": enabled ? "true" : "false",
+                "rows": String(rows.count),
+            ])
         self.isEnabled = enabled
         if enabled {
             self.startHoverMonitoringIfNeeded()
@@ -39,6 +46,8 @@ final class QueryOverlayManager {
 
         let candidates = Array(rows.prefix(self.maxOverlayCount))
         var activeIDs = Set<QueryResultRow.ID>()
+        var createdCount = 0
+        var updatedCount = 0
 
         for row in candidates {
             guard let frame = row.frame else { continue }
@@ -54,19 +63,39 @@ final class QueryOverlayManager {
                 overlay.row = row
                 overlay.view.update(index: row.index, color: roleColor)
                 if overlay.window.frame != overlayFrame {
+                    TemporaryTelemetry.shared.log(
+                        category: "overlay-op",
+                        message: "set_frame",
+                        metadata: [
+                            "row": "\(row.id)",
+                            "frame": Self.frameSummary(overlayFrame),
+                        ])
                     overlay.window.setFrame(overlayFrame, display: true)
                 }
                 if !overlay.window.isVisible {
+                    TemporaryTelemetry.shared.log(
+                        category: "overlay-op",
+                        message: "order_front_existing",
+                        metadata: ["row": "\(row.id)"])
                     overlay.window.orderFrontRegardless()
                 }
+                updatedCount += 1
             } else {
                 let view = ResultOverlayView(frame: CGRect(origin: .zero, size: overlayFrame.size))
                 view.update(index: row.index, color: roleColor)
 
                 let window = ResultOverlayWindow(contentRect: overlayFrame, overlayView: view)
+                TemporaryTelemetry.shared.log(
+                    category: "overlay-op",
+                    message: "order_front_new",
+                    metadata: [
+                        "row": "\(row.id)",
+                        "frame": Self.frameSummary(overlayFrame),
+                    ])
                 window.orderFrontRegardless()
 
                 self.overlays[row.id] = OverlayEntry(row: row, window: window, view: view)
+                createdCount += 1
             }
         }
 
@@ -75,6 +104,16 @@ final class QueryOverlayManager {
             self.overlays[staleID]?.close()
             self.overlays.removeValue(forKey: staleID)
         }
+        TemporaryTelemetry.shared.log(
+            category: "overlay",
+            message: "update_complete",
+            metadata: [
+                "rows": String(rows.count),
+                "active": String(activeIDs.count),
+                "created": String(createdCount),
+                "updated": String(updatedCount),
+                "removed": String(staleIDs.count),
+            ])
 
         self.refreshHoveredOverlayFromPointer()
         self.applyVisualState()
@@ -82,12 +121,26 @@ final class QueryOverlayManager {
 
     func setExternalHighlightedRowID(_ rowID: QueryResultRow.ID?) {
         guard self.externalHighlightedRowID != rowID else { return }
+        TemporaryTelemetry.shared.log(
+            category: "hover",
+            message: "external_highlight_changed",
+            metadata: [
+                "from": self.externalHighlightedRowID.map { "\($0)" } ?? "nil",
+                "to": rowID.map { "\($0)" } ?? "nil",
+            ])
         self.externalHighlightedRowID = rowID
         self.applyVisualState()
     }
 
     private func setHoveredOverlayRowID(_ rowID: QueryResultRow.ID?) {
         guard self.hoveredOverlayRowID != rowID else { return }
+        TemporaryTelemetry.shared.log(
+            category: "hover",
+            message: "overlay_hover_row_changed",
+            metadata: [
+                "from": self.hoveredOverlayRowID.map { "\($0)" } ?? "nil",
+                "to": rowID.map { "\($0)" } ?? "nil",
+            ])
         self.hoveredOverlayRowID = rowID
         self.onOverlayHoverChanged?(rowID)
         self.applyVisualState()
@@ -143,6 +196,7 @@ final class QueryOverlayManager {
 
     private func startHoverMonitoringIfNeeded() {
         guard self.hoverRefreshTimer == nil else { return }
+        TemporaryTelemetry.shared.log(category: "overlay", message: "start_hover_monitoring")
 
         let timer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -155,6 +209,7 @@ final class QueryOverlayManager {
     }
 
     private func stopHoverMonitoring() {
+        TemporaryTelemetry.shared.log(category: "overlay", message: "stop_hover_monitoring")
         self.hoverRefreshTimer?.invalidate()
         self.hoverRefreshTimer = nil
     }
@@ -236,6 +291,10 @@ final class QueryOverlayManager {
         let intersection = lhs.intersection(rhs)
         guard !intersection.isNull, !intersection.isInfinite else { return 0 }
         return max(0, intersection.width) * max(0, intersection.height)
+    }
+
+    fileprivate static func frameSummary(_ frame: CGRect) -> String {
+        "\(Int(frame.minX)),\(Int(frame.minY)) \(Int(frame.width))x\(Int(frame.height))"
     }
 
     private static func sanitizeOverlayFrame(_ frame: CGRect, visibleScreenUnion: CGRect) -> CGRect? {
@@ -429,6 +488,14 @@ private final class OverlayTooltipWindow: NSPanel {
         originX = min(max(originX, screenFrame.minX + 4), screenFrame.maxX - size.width - 4)
 
         self.tooltipView.configure(text: text, accentColor: accentColor)
+        TemporaryTelemetry.shared.log(
+            category: "overlay-op",
+            message: "tooltip_show",
+            metadata: [
+                "anchor": QueryOverlayManager.frameSummary(anchorRect),
+                "size": "\(Int(size.width))x\(Int(size.height))",
+                "text_length": String(text.count),
+            ])
         self.setFrame(CGRect(x: originX, y: originY, width: size.width, height: size.height), display: true)
         self.orderFrontRegardless()
     }
