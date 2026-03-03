@@ -133,7 +133,7 @@ struct WorkbenchView: View {
             List(selection: $model.selectedRowID) {
                 ForEach(model.filteredRows) { row in
                     HStack(spacing: 10) {
-                        Text(String(format: "%4d", row.index))
+                        Text("\(row.index)")
                             .foregroundStyle(.secondary)
                             .frame(width: 44, alignment: .trailing)
 
@@ -163,7 +163,7 @@ struct WorkbenchView: View {
                     .lineLimit(1)
                     .tag(row.id)
                     .onHover { inside in
-                        model.setListHoveredRowID(inside ? row.id : nil)
+                        model.setListHover(rowID: row.id, inside: inside)
                     }
                     .listRowBackground(
                         row.id == model.hoveredRowID

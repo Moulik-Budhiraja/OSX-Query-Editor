@@ -6,14 +6,14 @@ final class QueryOverlayManager {
     var onOverlayHoverChanged: ((QueryResultRow.ID?) -> Void)?
 
     private let maxOverlayCount = 250
+    private let tooltipMaxCharacters = 240
     private var isEnabled = false
     private var overlays: [QueryResultRow.ID: OverlayEntry] = [:]
     private var externalHighlightedRowID: QueryResultRow.ID?
     private var hoveredOverlayRowID: QueryResultRow.ID?
     private var tooltipWindow: OverlayTooltipWindow?
-    private var globalMouseMonitor: Any?
-    private var localMouseMonitor: Any?
     private var hoverRefreshTimer: Timer?
+    private var isRefreshingHover = false
 
     func setEnabled(_ enabled: Bool, rows: [QueryResultRow]) {
         self.isEnabled = enabled
@@ -31,13 +31,21 @@ final class QueryOverlayManager {
             return
         }
 
+        let screens = NSScreen.screens
+        guard let visibleScreenUnion = Self.unionRect(of: screens.map(\.frame)) else {
+            self.teardown()
+            return
+        }
+
         let candidates = Array(rows.prefix(self.maxOverlayCount))
         var activeIDs = Set<QueryResultRow.ID>()
 
         for row in candidates {
             guard let frame = row.frame else { continue }
             let convertedFrame = Self.convertAXFrameToScreen(frame).integral
-            guard convertedFrame.width > 1, convertedFrame.height > 1 else { continue }
+            guard let overlayFrame = Self.sanitizeOverlayFrame(convertedFrame, visibleScreenUnion: visibleScreenUnion) else {
+                continue
+            }
 
             activeIDs.insert(row.id)
             let roleColor = OXQColorTheme.nsColor(forRole: row.role)
@@ -45,13 +53,17 @@ final class QueryOverlayManager {
             if let overlay = self.overlays[row.id] {
                 overlay.row = row
                 overlay.view.update(index: row.index, color: roleColor)
-                overlay.window.setFrame(convertedFrame, display: true)
-                overlay.window.orderFrontRegardless()
+                if overlay.window.frame != overlayFrame {
+                    overlay.window.setFrame(overlayFrame, display: true)
+                }
+                if !overlay.window.isVisible {
+                    overlay.window.orderFrontRegardless()
+                }
             } else {
-                let view = ResultOverlayView(frame: CGRect(origin: .zero, size: convertedFrame.size))
+                let view = ResultOverlayView(frame: CGRect(origin: .zero, size: overlayFrame.size))
                 view.update(index: row.index, color: roleColor)
 
-                let window = ResultOverlayWindow(contentRect: convertedFrame, overlayView: view)
+                let window = ResultOverlayWindow(contentRect: overlayFrame, overlayView: view)
                 window.orderFrontRegardless()
 
                 self.overlays[row.id] = OverlayEntry(row: row, window: window, view: view)
@@ -69,6 +81,7 @@ final class QueryOverlayManager {
     }
 
     func setExternalHighlightedRowID(_ rowID: QueryResultRow.ID?) {
+        guard self.externalHighlightedRowID != rowID else { return }
         self.externalHighlightedRowID = rowID
         self.applyVisualState()
     }
@@ -81,6 +94,10 @@ final class QueryOverlayManager {
     }
 
     private func refreshHoveredOverlayFromPointer() {
+        guard !self.isRefreshingHover else { return }
+        self.isRefreshingHover = true
+        defer { self.isRefreshingHover = false }
+
         guard self.isEnabled, !self.overlays.isEmpty else {
             self.setHoveredOverlayRowID(nil)
             return
@@ -117,45 +134,20 @@ final class QueryOverlayManager {
         if self.tooltipWindow == nil {
             self.tooltipWindow = OverlayTooltipWindow()
         }
+        let tooltipText = String(hovered.row.resultsDisplayName.prefix(self.tooltipMaxCharacters))
         self.tooltipWindow?.show(
-            text: hovered.row.resultsDisplayName,
+            text: tooltipText,
             accentColor: OXQColorTheme.nsColor(forRole: hovered.row.role),
             anchorRect: hovered.window.frame)
     }
 
     private func startHoverMonitoringIfNeeded() {
-        guard self.globalMouseMonitor == nil, self.localMouseMonitor == nil else { return }
+        guard self.hoverRefreshTimer == nil else { return }
 
-        let trackedEvents: NSEvent.EventTypeMask = [
-            .mouseMoved,
-            .leftMouseDragged,
-            .rightMouseDragged,
-            .otherMouseDragged,
-            .leftMouseDown,
-            .leftMouseUp,
-            .rightMouseDown,
-            .rightMouseUp,
-            .otherMouseDown,
-            .otherMouseUp,
-            .scrollWheel,
-        ]
-
-        self.globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: trackedEvents) { [weak self] _ in
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.refreshHoveredOverlayFromPointer()
-            }
-        }
-
-        self.localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: trackedEvents) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.refreshHoveredOverlayFromPointer()
-            }
-            return event
-        }
-
-        let timer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.refreshHoveredOverlayFromPointer()
+                guard let self, self.isEnabled else { return }
+                self.refreshHoveredOverlayFromPointer()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -163,14 +155,6 @@ final class QueryOverlayManager {
     }
 
     private func stopHoverMonitoring() {
-        if let globalMouseMonitor {
-            NSEvent.removeMonitor(globalMouseMonitor)
-            self.globalMouseMonitor = nil
-        }
-        if let localMouseMonitor {
-            NSEvent.removeMonitor(localMouseMonitor)
-            self.localMouseMonitor = nil
-        }
         self.hoverRefreshTimer?.invalidate()
         self.hoverRefreshTimer = nil
     }
@@ -252,6 +236,35 @@ final class QueryOverlayManager {
         let intersection = lhs.intersection(rhs)
         guard !intersection.isNull, !intersection.isInfinite else { return 0 }
         return max(0, intersection.width) * max(0, intersection.height)
+    }
+
+    private static func sanitizeOverlayFrame(_ frame: CGRect, visibleScreenUnion: CGRect) -> CGRect? {
+        let normalized = frame.standardized
+        guard normalized.minX.isFinite, normalized.minY.isFinite, normalized.width.isFinite, normalized.height.isFinite else {
+            return nil
+        }
+        guard normalized.width > 1, normalized.height > 1 else { return nil }
+        guard abs(normalized.minX) < 1_000_000, abs(normalized.minY) < 1_000_000 else { return nil }
+        guard normalized.width < 1_000_000, normalized.height < 1_000_000 else { return nil }
+
+        let clipped = normalized.intersection(visibleScreenUnion).integral
+        guard !clipped.isNull, !clipped.isInfinite else { return nil }
+        guard clipped.width > 1, clipped.height > 1 else { return nil }
+        guard clipped.minX.isFinite, clipped.minY.isFinite else { return nil }
+        return clipped
+    }
+
+    private static func unionRect(of rects: [CGRect]) -> CGRect? {
+        guard !rects.isEmpty else { return nil }
+        var union = rects[0]
+        for rect in rects.dropFirst() {
+            union = union.union(rect)
+        }
+        guard union.minX.isFinite, union.minY.isFinite, union.width.isFinite, union.height.isFinite else {
+            return nil
+        }
+        guard !union.isNull, !union.isInfinite, union.width > 1, union.height > 1 else { return nil }
+        return union
     }
 }
 
@@ -387,8 +400,24 @@ private final class OverlayTooltipWindow: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func show(text: String, accentColor: NSColor, anchorRect: CGRect) {
+        guard
+            anchorRect.minX.isFinite,
+            anchorRect.minY.isFinite,
+            anchorRect.width.isFinite,
+            anchorRect.height.isFinite,
+            anchorRect.width > 1,
+            anchorRect.height > 1
+        else {
+            self.orderOut(nil)
+            return
+        }
+
         let screen = NSScreen.screens.first(where: { $0.frame.intersects(anchorRect) }) ?? NSScreen.main
         let screenFrame = screen?.visibleFrame ?? NSScreen.screens.first?.visibleFrame ?? .zero
+        guard !screenFrame.isNull, !screenFrame.isInfinite, screenFrame.width > 1, screenFrame.height > 1 else {
+            self.orderOut(nil)
+            return
+        }
         let maxWidth = max(120, screenFrame.width - 12)
         let size = self.tooltipView.measure(text: text, maxWidth: maxWidth)
 

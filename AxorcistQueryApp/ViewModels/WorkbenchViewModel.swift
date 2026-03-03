@@ -83,10 +83,17 @@ final class WorkbenchViewModel: ObservableObject {
         self.syncOverlays()
     }
 
-    func setListHoveredRowID(_ rowID: QueryResultRow.ID?) {
-        self.listHoveredRowID = rowID
+    func setListHover(rowID: QueryResultRow.ID, inside: Bool) {
+        if inside {
+            guard self.listHoveredRowID != rowID else { return }
+            self.listHoveredRowID = rowID
+        } else {
+            // Ignore stale leave events from rows that are no longer the active hover target.
+            guard self.listHoveredRowID == rowID else { return }
+            self.listHoveredRowID = nil
+        }
         self.updateHoveredRowID()
-        self.overlayManager.setExternalHighlightedRowID(rowID)
+        self.overlayManager.setExternalHighlightedRowID(self.listHoveredRowID)
     }
 
     func runQuery() {
