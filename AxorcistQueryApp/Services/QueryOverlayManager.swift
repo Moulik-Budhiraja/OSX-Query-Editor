@@ -394,19 +394,43 @@ private final class ResultOverlayView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        guard
+            self.bounds.minX.isFinite,
+            self.bounds.minY.isFinite,
+            self.bounds.width.isFinite,
+            self.bounds.height.isFinite,
+            self.bounds.width > 0.5,
+            self.bounds.height > 0.5
+        else {
+            return
+        }
+
         let prominence: CGFloat = self.isProminent ? 1 : 0
         let fillAlpha = 0.12 + (0.14 * prominence)
         let strokeAlpha = 0.58 + (0.30 * prominence)
-        let lineWidth = 1.6 + (1.2 * prominence)
+        let maxSafeLineWidth = max(0.8, min(self.bounds.width, self.bounds.height) - 0.4)
+        let lineWidth = min(1.6 + (1.2 * prominence), maxSafeLineWidth)
+        guard lineWidth.isFinite, lineWidth > 0 else { return }
 
-        let frameRect = self.bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
-        let rounded = NSBezierPath(roundedRect: frameRect, xRadius: 7, yRadius: 7)
+        let frameRect = self.bounds.insetBy(dx: lineWidth / 2, dy: lineWidth / 2).standardized
+        guard frameRect.width > 0.4, frameRect.height > 0.4 else { return }
+
+        let maxRadius = max(0, min(frameRect.width, frameRect.height) / 2)
+        let cornerRadius = min(7, maxRadius)
+        guard cornerRadius.isFinite else { return }
+
+        let rounded = NSBezierPath(roundedRect: frameRect, xRadius: cornerRadius, yRadius: cornerRadius)
 
         self.roleColor.withAlphaComponent(fillAlpha).setFill()
         rounded.fill()
         self.roleColor.withAlphaComponent(strokeAlpha).setStroke()
         rounded.lineWidth = lineWidth
         rounded.stroke()
+
+        // Tiny overlays cannot reliably render the index badge; skip it.
+        if frameRect.width < 48 || frameRect.height < 24 {
+            return
+        }
 
         let badgeText = "\(self.index)" as NSString
         let textAttrs: [NSAttributedString.Key: Any] = [
@@ -419,6 +443,7 @@ private final class ResultOverlayView: NSView {
             y: frameRect.maxY - textSize.height - 10,
             width: textSize.width + 12,
             height: textSize.height + 4)
+        guard badgeRect.width > 2, badgeRect.height > 2 else { return }
 
         let badgePath = NSBezierPath(roundedRect: badgeRect, xRadius: 6, yRadius: 6)
         self.roleColor.withAlphaComponent(0.92).setFill()
