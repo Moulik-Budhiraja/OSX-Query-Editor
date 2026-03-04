@@ -8,6 +8,19 @@ final class WorkbenchViewModel: ObservableObject {
         case manual
         case typingCached
         case typingLiveRefresh
+        case modeSwitchToAction
+    }
+
+    private struct QueryIdentity: Equatable {
+        let appIdentifier: String
+        let selector: String
+        let maxDepth: Int
+
+        init(request: QueryRequest) {
+            self.appIdentifier = request.appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.selector = request.selector.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.maxDepth = request.maxDepth
+        }
     }
 
     @Published var appIdentifier = "focused"
@@ -43,6 +56,7 @@ final class WorkbenchViewModel: ObservableObject {
     private var appWarmDebounceTask: Task<Void, Never>?
     private var queryRunToken: UInt64 = 0
     private var appWarmToken: UInt64 = 0
+    private var lastLiveRefreshIdentity: QueryIdentity?
 
     init() {
         self.overlayManager.onOverlayHoverChanged = { [weak self] rowID in
@@ -131,6 +145,7 @@ final class WorkbenchViewModel: ObservableObject {
         self.typingDebounceTask?.cancel()
         self.appWarmDebounceTask?.cancel()
         self.service.invalidateWarmCache()
+        self.lastLiveRefreshIdentity = nil
         self.bumpQueryRunToken()
         self.clearSelectedAttributeDetails()
 
@@ -160,6 +175,11 @@ final class WorkbenchViewModel: ObservableObject {
     func handleEditorModeChanged() {
         self.typingDebounceTask?.cancel()
         self.bumpQueryRunToken()
+
+        guard self.editorMode == .action else {
+            return
+        }
+        self.runLiveRefreshForActionModeIfNeeded()
     }
 
     func handleSelectorQueryChanged() {
@@ -293,6 +313,9 @@ final class WorkbenchViewModel: ObservableObject {
             }
 
             self.apply(result: result)
+            if mode == .liveRefresh {
+                self.lastLiveRefreshIdentity = QueryIdentity(request: request)
+            }
             self.isRunning = false
 
             switch trigger {
@@ -302,6 +325,8 @@ final class WorkbenchViewModel: ObservableObject {
                 self.statusMessage = "Cached preview. \(result.stats.matchedCount) matches."
             case .typingLiveRefresh:
                 self.statusMessage = "Live refresh complete. \(result.stats.matchedCount) matches."
+            case .modeSwitchToAction:
+                self.statusMessage = "Action mode ready. \(result.stats.matchedCount) matches."
             }
         } catch {
             guard runToken == self.queryRunToken else {
@@ -321,6 +346,9 @@ final class WorkbenchViewModel: ObservableObject {
             case .typingLiveRefresh:
                 self.errorMessage = error.localizedDescription
                 self.statusMessage = "Live refresh failed"
+            case .modeSwitchToAction:
+                self.errorMessage = error.localizedDescription
+                self.statusMessage = "Action mode refresh failed"
             }
         }
     }
@@ -383,6 +411,32 @@ final class WorkbenchViewModel: ObservableObject {
     private func syncOverlays() {
         self.overlayManager.setEnabled(self.showResultOverlays, rows: self.allRows)
         self.overlayManager.setExternalHighlightedRowID(self.listHoveredRowID)
+    }
+
+    private func runLiveRefreshForActionModeIfNeeded() {
+        guard !self.isRunning else {
+            return
+        }
+
+        guard let request = try? self.makeRequest() else {
+            return
+        }
+
+        let currentIdentity = QueryIdentity(request: request)
+        let hasCurrentLiveSnapshot = self.stats?.usedWarmCache == false
+            && self.lastLiveRefreshIdentity == currentIdentity
+        guard !hasCurrentLiveSnapshot else {
+            return
+        }
+
+        self.typingDebounceTask?.cancel()
+        self.appWarmDebounceTask?.cancel()
+        self.bumpAppWarmToken()
+        let runToken = self.bumpQueryRunToken()
+        self.executeQuery(
+            mode: .liveRefresh,
+            trigger: .modeSwitchToAction,
+            runToken: runToken)
     }
 
     private static func displayName(for app: NSRunningApplication) -> String {

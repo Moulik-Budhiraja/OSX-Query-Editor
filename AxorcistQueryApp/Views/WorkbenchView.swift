@@ -162,6 +162,7 @@ struct WorkbenchView: View {
                     .font(.headline)
                 OXAHighlightedEditor(
                     text: $model.actionProgram,
+                    referenceRows: model.allRows,
                     fontSize: 16,
                     focusRequestID: model.editorFocusRequestID,
                     onRunAction: { model.runActiveEditorProgram() },

@@ -4,6 +4,7 @@ import SwiftUI
 struct OXAHighlightedEditor: NSViewRepresentable {
     @Binding var text: String
 
+    var referenceRows: [QueryResultRow] = []
     var fontSize: CGFloat = 16
     var focusRequestID: UInt64 = 0
     var onRunAction: (() -> Void)?
@@ -57,6 +58,7 @@ struct OXAHighlightedEditor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
+        context.coordinator.parent = self
         textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
 
         if context.coordinator.lastFocusRequestID != self.focusRequestID {
@@ -80,7 +82,7 @@ struct OXAHighlightedEditor: NSViewRepresentable {
         private var pendingAutocompleteForce = false
         private var suppressNextAutocompleteRefresh = false
         private var activeAutocompleteQuery: OXAAutocompleteQuery?
-        private var currentSuggestions: [String] = []
+        private var currentSuggestions: [OXAAutocompleteSuggestion] = []
         private var selectedSuggestionIndex = 0
         private let autocomplete = OXAAutocompleteEngine()
         private let suggestionPopoverController = OXASuggestionPopoverController()
@@ -231,7 +233,8 @@ struct OXAHighlightedEditor: NSViewRepresentable {
             let suggestions = self.autocomplete.suggestions(
                 for: query,
                 force: force,
-                limit: OXAAutocompleteEngine.maxVisibleSuggestions)
+                limit: OXAAutocompleteEngine.maxVisibleSuggestions,
+                referenceRows: self.parent.referenceRows)
             guard !suggestions.isEmpty else {
                 self.dismissSuggestionPopover()
                 return
@@ -278,7 +281,7 @@ struct OXAHighlightedEditor: NSViewRepresentable {
                 return
             }
 
-            var replacementText = self.currentSuggestions[index]
+            var replacementText = self.currentSuggestions[index].insertionText
             if query.replacementRange.length == 0,
                query.replacementRange.location > 0,
                let previousCharacter = self.character(beforeUTF16Offset: query.replacementRange.location, in: textView.string),
@@ -352,7 +355,7 @@ private final class OXASuggestionPopoverController {
 
     private let popover: NSPopover
     private let hostingController: NSHostingController<OXASuggestionPopoverView>
-    private var suggestions: [String] = []
+    private var suggestions: [OXAAutocompleteSuggestion] = []
     private var selectedIndex = 0
     private weak var anchorView: NSView?
 
@@ -370,7 +373,7 @@ private final class OXASuggestionPopoverController {
         self.popover.contentViewController = self.hostingController
     }
 
-    func update(suggestions: [String], selectedIndex: Int, fontSize: CGFloat) {
+    func update(suggestions: [OXAAutocompleteSuggestion], selectedIndex: Int, fontSize: CGFloat) {
         self.suggestions = suggestions
         self.selectedIndex = max(0, min(selectedIndex, max(0, suggestions.count - 1)))
         self.hostingController.rootView = OXASuggestionPopoverView(
@@ -406,22 +409,41 @@ private final class OXASuggestionPopoverController {
         self.anchorView = nil
     }
 
-    private func measuredSize(suggestions: [String], fontSize: CGFloat) -> NSSize {
+    private func measuredSize(suggestions: [OXAAutocompleteSuggestion], fontSize: CGFloat) -> NSSize {
         let maxRows = min(10, suggestions.count)
-        let rowHeight = max(24, floor(fontSize) + 10)
-        let contentHeight = CGFloat(maxRows) * CGFloat(rowHeight) + 52
+        let visibleSuggestions = Array(suggestions.prefix(maxRows))
+        let keywordRowHeight = max(20, floor(fontSize) + 7)
+        let referenceRowHeight = max(30, floor(fontSize) + 8)
+        let contentRowsHeight = visibleSuggestions.reduce(CGFloat(0)) { partial, suggestion in
+            switch suggestion.kind {
+            case .keyword:
+                return partial + keywordRowHeight
+            case .reference:
+                return partial + referenceRowHeight
+            }
+        }
+        let includesReferenceRows = suggestions.contains { suggestion in
+            if case .reference = suggestion.kind {
+                return true
+            }
+            return false
+        }
+        let minimumRowsHeight = includesReferenceRows
+            ? (referenceRowHeight * 3.5)
+            : (keywordRowHeight * 6.0)
+        let contentHeight = max(contentRowsHeight, minimumRowsHeight) + 42
 
-        let maxCharacters = suggestions.map(\.count).max() ?? 16
-        let estimatedWidth = CGFloat(maxCharacters) * max(7.4, fontSize * 0.58) + 88
-        let width = min(max(240, estimatedWidth), 520)
+        let maxCharacters = visibleSuggestions.map(\.displayWidthHint).max() ?? 20
+        let estimatedWidth = CGFloat(maxCharacters) * max(6.2, fontSize * 0.48) + 68
+        let width = min(max(232, estimatedWidth), 420)
 
-        return NSSize(width: width, height: min(contentHeight, 340))
+        return NSSize(width: width, height: min(contentHeight, 286))
     }
 }
 
 @MainActor
 private struct OXASuggestionPopoverView: View {
-    let suggestions: [String]
+    let suggestions: [OXAAutocompleteSuggestion]
     let selectedIndex: Int
     let fontSize: CGFloat
     let onSelect: (Int) -> Void
@@ -448,30 +470,11 @@ private struct OXASuggestionPopoverView: View {
                 ScrollView(.vertical, showsIndicators: suggestions.count > 8) {
                     LazyVStack(spacing: 2) {
                         ForEach(Array(suggestions.enumerated()), id: \.offset) { index, suggestion in
-                            HStack(spacing: 8) {
-                                Text(suggestion)
-                                    .font(.system(size: max(12, fontSize - 1), weight: .regular, design: .monospaced))
-                                    .lineLimit(1)
-                                    .foregroundStyle(index == selectedIndex ? Color.white : Color.primary)
-                                Spacer(minLength: 8)
-                                Text("KW")
-                                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .foregroundStyle(index == selectedIndex ? Color.white.opacity(0.92) : Color.secondary)
-                                    .background(index == selectedIndex ? Color.white.opacity(0.2) : Color.secondary.opacity(0.14))
-                                    .clipShape(Capsule(style: .continuous))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(index == selectedIndex ? Color.accentColor.opacity(0.92) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .contentShape(Rectangle())
-                            .id(index)
-                            .onTapGesture {
-                                onSelect(index)
-                            }
+                            self.suggestionRow(suggestion, selected: index == selectedIndex)
+                                .id(index)
+                                .onTapGesture {
+                                    onSelect(index)
+                                }
                         }
                     }
                     .onChange(of: selectedIndex) { _, newValue in
@@ -500,12 +503,242 @@ private struct OXASuggestionPopoverView: View {
                 .shadow(color: Color.black.opacity(0.16), radius: 12, x: 0, y: 5))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    @ViewBuilder
+    private func suggestionRow(_ suggestion: OXAAutocompleteSuggestion, selected: Bool) -> some View {
+        switch suggestion.kind {
+        case .keyword:
+            HStack(spacing: 8) {
+                Text(suggestion.insertionText)
+                    .font(.system(size: max(11, fontSize - 2), weight: .regular, design: .monospaced))
+                    .lineLimit(1)
+                    .foregroundStyle(selected ? Color.white : Color.primary)
+                Spacer(minLength: 8)
+                self.badgeText("KW", selected: selected)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Color.accentColor.opacity(0.92) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+
+        case let .reference(payload):
+            let primaryText = self.primaryText(for: payload)
+            let secondary = self.secondaryTexts(for: payload)
+
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 8) {
+                    Text(primaryText)
+                        .font(.system(size: max(10, fontSize - 2), weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .foregroundStyle(self.primaryMatchColor(payload.matchField))
+                    Spacer(minLength: 8)
+                    Text(payload.matchField.badge)
+                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .foregroundStyle(Color.secondary)
+                        .background(Color.secondary.opacity(0.14))
+                        .clipShape(Capsule(style: .continuous))
+                }
+
+                HStack(spacing: 6) {
+                    Text(secondary.left)
+                        .font(.system(size: max(9, fontSize - 5), weight: .regular, design: .monospaced))
+                        .foregroundStyle(selected ? Color.primary.opacity(0.92) : Color.secondary)
+                        .lineLimit(1)
+                    Text("·")
+                        .font(.system(size: max(9, fontSize - 5), weight: .semibold, design: .rounded))
+                        .foregroundStyle(selected ? Color.primary.opacity(0.55) : Color.secondary)
+                    Text(secondary.right)
+                        .font(.system(size: max(9, fontSize - 5), weight: .regular, design: .monospaced))
+                        .foregroundStyle(selected ? Color.primary.opacity(0.92) : Color.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Color.white.opacity(0.10) : Color.secondary.opacity(0.06))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color.white.opacity(selected ? 0.18 : 0.08), lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+        }
+    }
+
+    private func badgeText(_ text: String, selected: Bool) -> some View {
+        Text(text)
+            .font(.system(size: 8, weight: .bold, design: .rounded))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .foregroundStyle(selected ? Color.white.opacity(0.92) : Color.secondary)
+            .background(selected ? Color.white.opacity(0.2) : Color.secondary.opacity(0.14))
+            .clipShape(Capsule(style: .continuous))
+    }
+
+    private func primaryText(for payload: OXAReferenceAutocompletePayload) -> String {
+        switch payload.matchField {
+        case .reference:
+            return payload.reference
+        case .cpName:
+            let cpName = self.contextTruncatedText(
+                payload.cpName,
+                around: payload.cpNameMatchRange,
+                maxLength: 26)
+            return cpName
+        case .role:
+            return payload.role
+        }
+    }
+
+    private func secondaryTexts(for payload: OXAReferenceAutocompletePayload) -> (left: String, right: String) {
+        let truncatedCPName = self.tailTruncatedText(payload.cpName, maxLength: 14)
+
+        switch payload.matchField {
+        case .reference:
+            return (left: truncatedCPName, right: self.tailTruncatedText(payload.role, maxLength: 12))
+        case .cpName:
+            return (left: payload.reference, right: self.tailTruncatedText(payload.role, maxLength: 12))
+        case .role:
+            return (left: truncatedCPName, right: payload.reference)
+        }
+    }
+
+    private func tailTruncatedText(_ text: String, maxLength: Int) -> String {
+        guard maxLength > 1 else { return text }
+        let nsText = text as NSString
+        guard nsText.length > maxLength else { return text }
+        return nsText.substring(to: maxLength - 1) + "…"
+    }
+
+    private func contextTruncatedText(_ text: String, around matchRange: NSRange?, maxLength: Int) -> String {
+        guard maxLength > 6 else { return self.tailTruncatedText(text, maxLength: maxLength) }
+        let nsText = text as NSString
+        guard nsText.length > maxLength else { return text }
+        guard let matchRange else {
+            return self.tailTruncatedText(text, maxLength: maxLength)
+        }
+
+        let clampedLocation = max(0, min(matchRange.location, nsText.length - 1))
+        let clampedLength = max(1, min(matchRange.length, nsText.length - clampedLocation))
+        let target = NSRange(location: clampedLocation, length: clampedLength)
+
+        var start = max(0, target.location - (maxLength / 3))
+        var end = min(nsText.length, start + maxLength)
+        if end - start < maxLength {
+            start = max(0, end - maxLength)
+        }
+        if target.location + target.length > end {
+            end = min(nsText.length, target.location + target.length)
+            start = max(0, end - maxLength)
+        }
+
+        var snippet = nsText.substring(with: NSRange(location: start, length: end - start))
+        if start > 0 {
+            snippet = "…" + snippet
+        }
+        if end < nsText.length {
+            snippet += "…"
+        }
+        return snippet
+    }
+
+    private func primaryMatchColor(_ field: OXAReferenceMatchField) -> Color {
+        switch field {
+        case .reference:
+            return Color(nsColor: OXAColorTheme.referenceToken)
+        case .cpName:
+            return Color(nsColor: OXAColorTheme.stringToken)
+        case .role:
+            return Color(nsColor: OXAColorTheme.attributeToken)
+        }
+    }
 }
 
 private struct OXAAutocompleteQuery {
     let prefix: String
     let replacementRange: NSRange
-    let candidates: [String]
+    let keywordCandidates: [String]
+    let expectsReference: Bool
+}
+
+private struct OXAAutocompleteSuggestion {
+    enum Kind {
+        case keyword
+        case reference(OXAReferenceAutocompletePayload)
+    }
+
+    let insertionText: String
+    let kind: Kind
+
+    var displayWidthHint: Int {
+        switch self.kind {
+        case .keyword:
+            return self.insertionText.count
+        case let .reference(payload):
+            let referenceLength = min(payload.reference.count, 10)
+            let roleLength = min(payload.role.count, 10)
+            let cpNameLength = min(payload.cpName.count, 12) + 2
+            return min(34, max(cpNameLength + roleLength + 2, max(referenceLength, roleLength) + 6))
+        }
+    }
+}
+
+private enum OXAReferenceMatchField: Int {
+    case reference = 0
+    case cpName = 1
+    case role = 2
+
+    var label: String {
+        switch self {
+        case .reference:
+            return "Ref ID Match"
+        case .cpName:
+            return "Name Match"
+        case .role:
+            return "Role Match"
+        }
+    }
+
+    var badge: String {
+        switch self {
+        case .reference:
+            return "REF"
+        case .cpName:
+            return "CP"
+        case .role:
+            return "ROLE"
+        }
+    }
+}
+
+private struct OXAReferenceAutocompletePayload {
+    let reference: String
+    let cpName: String
+    let role: String
+    let matchField: OXAReferenceMatchField
+    let cpNameMatchRange: NSRange?
+}
+
+private struct OXAReferenceFieldMatch {
+    let field: OXAReferenceMatchField
+    let startIndex: Int
+    let spanLength: Int
+    let matchRange: NSRange
+
+    var ranking: (Int, Int, Int) {
+        (self.startIndex, self.field.rawValue, self.spanLength)
+    }
+}
+
+private struct OXAReferenceSearchCandidate {
+    let insertionText: String
+    let payload: OXAReferenceAutocompletePayload
+    let ranking: (Int, Int, Int)
+    let rowOrder: Int
 }
 
 private struct OXAAutocompleteToken {
@@ -555,29 +788,53 @@ private struct OXAAutocompleteEngine {
             return nil
         }
 
-        let candidates = self.candidates(for: scanResult.tokens)
-        guard !candidates.isEmpty else {
+        let keywordCandidates = self.candidates(for: scanResult.tokens)
+        let expectsReference = self.isReferenceContext(for: scanResult.tokens)
+        guard expectsReference || !keywordCandidates.isEmpty else {
             return nil
         }
 
-        return OXAAutocompleteQuery(prefix: prefix, replacementRange: replacementRange, candidates: candidates)
+        return OXAAutocompleteQuery(
+            prefix: prefix,
+            replacementRange: replacementRange,
+            keywordCandidates: keywordCandidates,
+            expectsReference: expectsReference)
     }
 
-    func suggestions(for query: OXAAutocompleteQuery, force: Bool, limit: Int) -> [String] {
+    func suggestions(
+        for query: OXAAutocompleteQuery,
+        force: Bool,
+        limit: Int,
+        referenceRows: [QueryResultRow]) -> [OXAAutocompleteSuggestion]
+    {
         let prefix = query.prefix.lowercased()
+        if query.expectsReference {
+            let referenceSuggestions = self.referenceSuggestions(
+                queryPrefix: prefix,
+                referenceRows: referenceRows,
+                limit: limit)
+            if !referenceSuggestions.isEmpty {
+                return referenceSuggestions
+            }
+
+            if !force {
+                return []
+            }
+        }
+
         let filtered: [String]
         if prefix.isEmpty {
-            filtered = force ? query.candidates : query.candidates
+            filtered = query.keywordCandidates
         } else {
-            filtered = query.candidates.filter { $0.lowercased().hasPrefix(prefix) }
+            filtered = query.keywordCandidates.filter { $0.lowercased().hasPrefix(prefix) }
         }
 
         var seen = Set<String>()
-        var deduped: [String] = []
+        var deduped: [OXAAutocompleteSuggestion] = []
         deduped.reserveCapacity(filtered.count)
         for suggestion in filtered {
             if seen.insert(suggestion).inserted {
-                deduped.append(suggestion)
+                deduped.append(OXAAutocompleteSuggestion(insertionText: suggestion, kind: .keyword))
             }
             if deduped.count == limit {
                 break
@@ -795,6 +1052,237 @@ private struct OXAAutocompleteEngine {
         }
 
         return ["to"] + Self.scrollDirections
+    }
+
+    private func isReferenceContext(for tokens: [OXAAutocompleteToken]) -> Bool {
+        let statementTokens = self.statementTokens(from: tokens)
+        let components = statementTokens.compactMap { token -> OXAAutocompleteComponent? in
+            switch token.kind {
+            case let .word(value):
+                return .word(value.lowercased())
+            case .string:
+                return .string
+            default:
+                return nil
+            }
+        }
+
+        guard let firstWord = self.word(at: 0, in: components) else {
+            return false
+        }
+
+        switch firstWord {
+        case "read":
+            return self.isReadReferenceContext(components)
+        case "send":
+            return self.isSendReferenceContext(components)
+        default:
+            return false
+        }
+    }
+
+    private func isReadReferenceContext(_ components: [OXAAutocompleteComponent]) -> Bool {
+        guard components.count >= 3 else { return false }
+        return self.word(at: 2, in: components) == "from"
+    }
+
+    private func isSendReferenceContext(_ components: [OXAAutocompleteComponent]) -> Bool {
+        let sendComponents = Array(components.dropFirst())
+        guard let action = self.word(at: 0, in: sendComponents) else {
+            return false
+        }
+
+        switch action {
+        case "text":
+            let isDirectTextTarget = sendComponents.count >= 3
+                && sendComponents[1] == .string
+                && self.word(at: 2, in: sendComponents) == "to"
+            let isKeysTextTarget = sendComponents.count >= 5
+                && sendComponents[1] == .string
+                && self.word(at: 2, in: sendComponents) == "as"
+                && self.word(at: 3, in: sendComponents) == "keys"
+                && self.word(at: 4, in: sendComponents) == "to"
+            return isDirectTextTarget || isKeysTextTarget
+
+        case "click":
+            return sendComponents.count >= 2 && self.word(at: 1, in: sendComponents) == "to"
+
+        case "right":
+            return sendComponents.count >= 3
+                && self.word(at: 1, in: sendComponents) == "click"
+                && self.word(at: 2, in: sendComponents) == "to"
+
+        case "drag":
+            if sendComponents.count == 1 {
+                return true
+            }
+            return sendComponents.count >= 3 && self.word(at: 2, in: sendComponents) == "to"
+
+        case "hotkey":
+            guard let toIndex = sendComponents.lastIndex(where: { component in
+                if case .word("to") = component { return true }
+                return false
+            }) else {
+                return false
+            }
+            return toIndex == sendComponents.count - 1
+
+        case "scroll":
+            if sendComponents.count >= 2 && self.word(at: 1, in: sendComponents) == "to" {
+                return true
+            }
+            return sendComponents.count >= 3 && self.word(at: 2, in: sendComponents) == "to"
+
+        default:
+            return false
+        }
+    }
+
+    private func referenceSuggestions(
+        queryPrefix: String,
+        referenceRows: [QueryResultRow],
+        limit: Int) -> [OXAAutocompleteSuggestion]
+    {
+        let trimmedPrefix = queryPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rowsWithReferences: [(row: QueryResultRow, reference: String, cpName: String, role: String)] = referenceRows.compactMap { row in
+            guard let reference = row.reference?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !reference.isEmpty
+            else {
+                return nil
+            }
+
+            let cpNameCandidate = row.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cpName = cpNameCandidate.isEmpty ? row.resultsDisplayName : cpNameCandidate
+            return (row: row, reference: reference, cpName: cpName, role: row.role)
+        }
+
+        guard !rowsWithReferences.isEmpty else {
+            return []
+        }
+
+        if trimmedPrefix.isEmpty {
+            return rowsWithReferences
+                .sorted { lhs, rhs in lhs.row.index < rhs.row.index }
+                .prefix(limit)
+                .map { candidate in
+                    let payload = OXAReferenceAutocompletePayload(
+                        reference: candidate.reference,
+                        cpName: candidate.cpName,
+                        role: candidate.role,
+                        matchField: .reference,
+                        cpNameMatchRange: nil)
+                    return OXAAutocompleteSuggestion(
+                        insertionText: candidate.reference,
+                        kind: .reference(payload))
+                }
+        }
+
+        var ranked: [OXAReferenceSearchCandidate] = []
+        ranked.reserveCapacity(rowsWithReferences.count)
+
+        for candidate in rowsWithReferences {
+            let fieldMatches: [OXAReferenceFieldMatch] = [
+                self.matchField(candidate.reference, prefix: trimmedPrefix, field: .reference),
+                self.matchField(candidate.cpName, prefix: trimmedPrefix, field: .cpName),
+                self.matchField(candidate.role, prefix: trimmedPrefix, field: .role),
+            ].compactMap { $0 }
+
+            guard let bestMatch = fieldMatches.min(by: { lhs, rhs in
+                if lhs.ranking != rhs.ranking {
+                    return lhs.ranking < rhs.ranking
+                }
+                return lhs.field.rawValue < rhs.field.rawValue
+            }) else {
+                continue
+            }
+
+            let payload = OXAReferenceAutocompletePayload(
+                reference: candidate.reference,
+                cpName: candidate.cpName,
+                role: candidate.role,
+                matchField: bestMatch.field,
+                cpNameMatchRange: bestMatch.field == .cpName ? bestMatch.matchRange : nil)
+            ranked.append(OXAReferenceSearchCandidate(
+                insertionText: candidate.reference,
+                payload: payload,
+                ranking: bestMatch.ranking,
+                rowOrder: candidate.row.index))
+        }
+
+        ranked.sort { lhs, rhs in
+            if lhs.ranking != rhs.ranking {
+                return lhs.ranking < rhs.ranking
+            }
+            if lhs.rowOrder != rhs.rowOrder {
+                return lhs.rowOrder < rhs.rowOrder
+            }
+            return lhs.payload.reference < rhs.payload.reference
+        }
+
+        return ranked.prefix(limit).map { candidate in
+            OXAAutocompleteSuggestion(
+                insertionText: candidate.insertionText,
+                kind: .reference(candidate.payload))
+        }
+    }
+
+    private func matchField(_ fieldText: String, prefix: String, field: OXAReferenceMatchField) -> OXAReferenceFieldMatch? {
+        guard !prefix.isEmpty else { return nil }
+        let normalizedField = fieldText.lowercased()
+        let normalizedPrefix = prefix.lowercased()
+
+        let normalizedNSString = normalizedField as NSString
+        let contiguousRange = normalizedNSString.range(of: normalizedPrefix)
+        if contiguousRange.location != NSNotFound {
+            return OXAReferenceFieldMatch(
+                field: field,
+                startIndex: contiguousRange.location,
+                spanLength: contiguousRange.length,
+                matchRange: contiguousRange)
+        }
+
+        let fieldUnits = Array(normalizedField.utf16)
+        let prefixUnits = Array(normalizedPrefix.utf16)
+        guard !prefixUnits.isEmpty else { return nil }
+
+        var prefixCursor = 0
+        var startIndex: Int?
+        var endIndex: Int?
+
+        for (index, unit) in fieldUnits.enumerated() {
+            guard unit == prefixUnits[prefixCursor] else {
+                continue
+            }
+
+            if startIndex == nil {
+                startIndex = index
+            }
+            endIndex = index
+            prefixCursor += 1
+            if prefixCursor == prefixUnits.count {
+                break
+            }
+        }
+
+        guard prefixCursor == prefixUnits.count, let startIndex, let endIndex else {
+            return nil
+        }
+
+        return OXAReferenceFieldMatch(
+            field: field,
+            startIndex: startIndex,
+            spanLength: max(1, endIndex - startIndex + 1),
+            matchRange: NSRange(location: startIndex, length: max(1, endIndex - startIndex + 1)))
+    }
+
+    private func word(at index: Int, in components: [OXAAutocompleteComponent]) -> String? {
+        guard index >= 0, index < components.count else {
+            return nil
+        }
+        guard case let .word(value) = components[index] else {
+            return nil
+        }
+        return value
     }
 
     private func statementTokens(from tokens: [OXAAutocompleteToken]) -> [OXAAutocompleteToken] {
