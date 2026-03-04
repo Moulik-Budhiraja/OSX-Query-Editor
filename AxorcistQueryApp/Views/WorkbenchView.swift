@@ -2,6 +2,7 @@ import SwiftUI
 
 struct WorkbenchView: View {
     @StateObject private var model = WorkbenchViewModel()
+    private static let referenceSkeletonToken = "000000000"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -109,6 +110,22 @@ struct WorkbenchView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 180)
+
+                Button {
+                    model.toggleEditorMode()
+                } label: {
+                    Text("⌘I")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.secondary.opacity(0.12))
+                        .clipShape(Capsule(style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("i", modifiers: [.command])
+                .help("Toggle Query/Action mode")
+
                 Spacer()
                 Button(model.editorMode == .query ? "Run Query" : "Run Action") {
                     model.runActiveEditorProgram()
@@ -141,7 +158,9 @@ struct WorkbenchView: View {
     }
 
     private var resultsPane: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let showReferenceSkeleton = model.stats?.usedWarmCache == true
+
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Results")
                     .font(.headline)
@@ -167,7 +186,13 @@ struct WorkbenchView: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 44, alignment: .trailing)
 
-                        if let reference = row.reference {
+                        if showReferenceSkeleton {
+                            Text(Self.referenceSkeletonToken)
+                                .redacted(reason: .placeholder)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 76, alignment: .leading)
+                        } else if let reference = row.reference {
                             Button(reference) {
                                 model.copyReferenceToClipboard(reference)
                             }
@@ -252,7 +277,18 @@ struct WorkbenchView: View {
             if let row = model.selectedRow {
                 VStack(alignment: .leading, spacing: 6) {
                     statLine("Index", "\(row.index)")
-                    statLine("Ref", row.reference ?? "")
+                    if model.stats?.usedWarmCache == true {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Ref")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(Self.referenceSkeletonToken)
+                                .redacted(reason: .placeholder)
+                                .font(.system(.body, design: .monospaced))
+                        }
+                    } else {
+                        statLine("Ref", row.reference ?? "")
+                    }
                     statLine("Role", row.role)
                     statLine("Name", row.name)
                     statLine("Name Source", row.nameSource ?? "")

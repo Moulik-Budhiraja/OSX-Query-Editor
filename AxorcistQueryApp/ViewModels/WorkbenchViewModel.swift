@@ -166,6 +166,10 @@ final class WorkbenchViewModel: ObservableObject {
         }
     }
 
+    func toggleEditorMode() {
+        self.editorMode = (self.editorMode == .query) ? .action : .query
+    }
+
     func runQuery() {
         self.typingDebounceTask?.cancel()
         self.appWarmDebounceTask?.cancel()
