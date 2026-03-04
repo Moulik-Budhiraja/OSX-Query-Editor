@@ -96,6 +96,13 @@ struct QueryExecutionResult {
     let rows: [QueryResultRow]
 }
 
+struct QueryAttributeDetail: Identifiable {
+    let name: String
+    let value: String
+
+    var id: String { name }
+}
+
 enum QueryWorkbenchError: LocalizedError {
     case missingAppIdentifier
     case missingSelector
@@ -103,6 +110,8 @@ enum QueryWorkbenchError: LocalizedError {
     case selfTargetUnsupported
     case focusedAppUnavailable
     case applicationNotFound(String)
+    case elementReferenceUnavailable(String)
+    case attributeInspectionFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -118,6 +127,10 @@ enum QueryWorkbenchError: LocalizedError {
             return "Focused app resolved to Axorcist Query App. Focus another app first, then run the query."
         case let .applicationNotFound(identifier):
             return "Could not find a running app for '\(identifier)'."
+        case let .elementReferenceUnavailable(reference):
+            return "Reference '\(reference)' is no longer available. Re-run query to refresh snapshot refs."
+        case let .attributeInspectionFailed(details):
+            return "Failed to inspect element attributes: \(details)"
         }
     }
 }

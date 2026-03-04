@@ -158,6 +158,45 @@ final class SelectorQueryService {
         SelectorActionRefStore.clear()
     }
 
+    func inspectElementAttributes(reference: String) throws -> [QueryAttributeDetail] {
+        guard let element = SelectorActionRefStore.element(for: reference) else {
+            throw QueryWorkbenchError.elementReferenceUnavailable(reference)
+        }
+
+        let names = (element.attributeNames() ?? []).sorted()
+        var details: [QueryAttributeDetail] = names.map { name in
+            QueryAttributeDetail(
+                name: name,
+                value: Self.inspectedAttributeValueString(for: element, attributeName: name))
+        }
+
+        if let actions = element.supportedActions(), !actions.isEmpty {
+            details.append(QueryAttributeDetail(
+                name: "SupportedActions",
+                value: actions.sorted().joined(separator: ", ")))
+        }
+
+        if let parameterized = Self.parameterizedAttributeNames(for: element), !parameterized.isEmpty {
+            details.append(QueryAttributeDetail(
+                name: "ParameterizedAttributes",
+                value: parameterized.sorted().joined(separator: ", ")))
+        }
+
+        if let computedName = element.computedName(), !computedName.isEmpty {
+            details.append(QueryAttributeDetail(
+                name: AXMiscConstants.computedNameAttributeKey,
+                value: computedName))
+        }
+
+        details.append(QueryAttributeDetail(
+            name: AXMiscConstants.isIgnoredAttributeKey,
+            value: element.isIgnored() ? "true" : "false"))
+
+        return details.sorted { lhs, rhs in
+            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
     private func makeExecutionContext(
         from snapshot: SelectorPrefetchSnapshot,
         isWarmCached: Bool) -> QueryExecutionContext
@@ -898,6 +937,83 @@ final class SelectorQueryService {
             token == "(null)" ||
             token == "<null>" ||
             token == "optional(nil)"
+    }
+
+    private static func inspectedAttributeValueString(for element: Element, attributeName: String) -> String {
+        var rawValue: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            element.underlyingElement,
+            attributeName as CFString,
+            &rawValue)
+
+        switch status {
+        case .success:
+            guard let rawValue else {
+                return "nil"
+            }
+            if CFGetTypeID(rawValue) == AXUIElementGetTypeID() {
+                let axElement = unsafeDowncast(rawValue, to: AXUIElement.self)
+                return Element(axElement).briefDescription(option: .raw)
+            }
+            if let elements = rawValue as? [AXUIElement] {
+                return "[\(elements.count) elements]"
+            }
+            return Self.stringify(rawValue) ?? String(describing: rawValue)
+
+        case .noValue:
+            return "nil"
+
+        default:
+            return "<\(Self.axErrorToken(status))>"
+        }
+    }
+
+    private static func parameterizedAttributeNames(for element: Element) -> [String]? {
+        var names: CFArray?
+        let status = AXUIElementCopyParameterizedAttributeNames(element.underlyingElement, &names)
+        guard status == .success else {
+            return nil
+        }
+        return names as? [String]
+    }
+
+    private static func axErrorToken(_ status: AXError) -> String {
+        switch status {
+        case .success:
+            return "AXSuccess"
+        case .failure:
+            return "AXFailure"
+        case .illegalArgument:
+            return "AXIllegalArgument"
+        case .invalidUIElement:
+            return "AXInvalidUIElement"
+        case .invalidUIElementObserver:
+            return "AXInvalidUIElementObserver"
+        case .cannotComplete:
+            return "AXCannotComplete"
+        case .attributeUnsupported:
+            return "AXAttributeUnsupported"
+        case .actionUnsupported:
+            return "AXActionUnsupported"
+        case .notificationUnsupported:
+            return "AXNotificationUnsupported"
+        case .notImplemented:
+            return "AXNotImplemented"
+        case .notificationAlreadyRegistered:
+            return "AXNotificationAlreadyRegistered"
+        case .notificationNotRegistered:
+            return "AXNotificationNotRegistered"
+        case .apiDisabled:
+            return "AXAPIDisabled"
+        case .noValue:
+            return "AXNoValue"
+        case .parameterizedAttributeUnsupported:
+            return "AXParameterizedAttributeUnsupported"
+        case .notEnoughPrecision:
+            return "AXNotEnoughPrecision"
+        @unknown default:
+            return "AXError(\(status.rawValue))"
+        }
     }
 }
 

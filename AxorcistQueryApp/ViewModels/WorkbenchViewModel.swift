@@ -25,6 +25,9 @@ final class WorkbenchViewModel: ObservableObject {
     @Published var selectedRowID: QueryResultRow.ID?
 
     @Published private(set) var stats: QueryStats?
+    @Published private(set) var selectedAttributeDetails: [QueryAttributeDetail] = []
+    @Published private(set) var selectedAttributesError: String?
+    @Published private(set) var isLoadingSelectedAttributes = false
     @Published private(set) var statusMessage = "Ready"
     @Published private(set) var errorMessage: String?
     @Published private(set) var isRunning = false
@@ -109,10 +112,19 @@ final class WorkbenchViewModel: ObservableObject {
     }
 
     func copyReferenceToClipboard(_ reference: String) {
+        self.copyStringToClipboard(reference)
+        self.statusMessage = "Copied ref \(reference)."
+    }
+
+    func copyPropertyNameToClipboard(_ propertyName: String) {
+        self.copyStringToClipboard(propertyName)
+        self.statusMessage = "Copied property \(propertyName)."
+    }
+
+    private func copyStringToClipboard(_ value: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setString(reference, forType: .string)
-        self.statusMessage = "Copied ref \(reference)."
+        pasteboard.setString(value, forType: .string)
     }
 
     func handleAppIdentifierChanged() {
@@ -120,6 +132,7 @@ final class WorkbenchViewModel: ObservableObject {
         self.appWarmDebounceTask?.cancel()
         self.service.invalidateWarmCache()
         self.bumpQueryRunToken()
+        self.clearSelectedAttributeDetails()
 
         let trimmedAppIdentifier = self.appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedAppIdentifier.isEmpty else {
@@ -156,6 +169,10 @@ final class WorkbenchViewModel: ObservableObject {
 
         self.typingDebounceTask?.cancel()
         self.queueTypingQueryRuns()
+    }
+
+    func handleSelectedRowChanged() {
+        self.refreshSelectedAttributeDetails()
     }
 
     func runActiveEditorProgram() {
@@ -325,10 +342,12 @@ final class WorkbenchViewModel: ObservableObject {
            filtered.contains(where: { $0.id == selectedRowID })
         {
             self.ensureHoveredRowExists()
+            self.refreshSelectedAttributeDetails()
             return
         }
         self.selectedRowID = filtered.first?.id
         self.ensureHoveredRowExists()
+        self.refreshSelectedAttributeDetails()
     }
 
     private func setOverlayHoveredRowID(_ rowID: QueryResultRow.ID?) {
@@ -365,5 +384,42 @@ final class WorkbenchViewModel: ObservableObject {
         let name = app.localizedName ?? "Unknown App"
         let bundle = app.bundleIdentifier ?? "no-bundle"
         return "\(name) (\(bundle))"
+    }
+
+    private func clearSelectedAttributeDetails() {
+        self.selectedAttributeDetails = []
+        self.selectedAttributesError = nil
+        self.isLoadingSelectedAttributes = false
+    }
+
+    private func refreshSelectedAttributeDetails() {
+        guard let selected = self.selectedRow else {
+            self.clearSelectedAttributeDetails()
+            return
+        }
+
+        guard let reference = selected.reference else {
+            self.clearSelectedAttributeDetails()
+            return
+        }
+
+        self.isLoadingSelectedAttributes = true
+        self.selectedAttributesError = nil
+
+        do {
+            let details = try self.service.inspectElementAttributes(reference: reference)
+            guard self.selectedRowID == selected.id else {
+                return
+            }
+            self.selectedAttributeDetails = details
+            self.isLoadingSelectedAttributes = false
+        } catch {
+            guard self.selectedRowID == selected.id else {
+                return
+            }
+            self.selectedAttributeDetails = []
+            self.selectedAttributesError = error.localizedDescription
+            self.isLoadingSelectedAttributes = false
+        }
     }
 }

@@ -37,6 +37,9 @@ struct WorkbenchView: View {
         .onChange(of: model.selectorQuery) { _, _ in
             model.handleSelectorQueryChanged()
         }
+        .onChange(of: model.selectedRowID) { _, _ in
+            model.handleSelectedRowChanged()
+        }
     }
 
     private var topBar: some View {
@@ -276,11 +279,14 @@ struct WorkbenchView: View {
                     statLine("Traversed", "\(stats.traversedCount)")
                     statLine("Matched", "\(stats.matchedCount)")
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Text("Run a query to see metrics.")
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var selectedElementPanel: some View {
@@ -318,6 +324,53 @@ struct WorkbenchView: View {
                         Text(path)
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
+                    }
+
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    HStack {
+                        Text("All Properties")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if model.isLoadingSelectedAttributes {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("\(model.selectedAttributeDetails.count)")
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let detailError = model.selectedAttributesError {
+                        Text(detailError)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.red)
+                    } else if model.selectedAttributeDetails.isEmpty {
+                        Text("No readable AX properties.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(model.selectedAttributeDetails) { detail in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Button(detail.name) {
+                                        model.copyPropertyNameToClipboard(detail.name)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 170, alignment: .leading)
+
+                                    Text(detail.value)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
                     }
                 }
             } else {
