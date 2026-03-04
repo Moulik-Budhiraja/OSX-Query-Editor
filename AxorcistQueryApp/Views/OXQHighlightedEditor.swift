@@ -5,6 +5,7 @@ import SwiftUI
 struct OXQHighlightedEditor: NSViewRepresentable {
     @Binding var text: String
 
+    var resultRows: [QueryResultRow] = []
     var fontSize: CGFloat = 16
     var focusRequestID: UInt64 = 0
     var onRunQuery: (() -> Void)?
@@ -58,6 +59,7 @@ struct OXQHighlightedEditor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = context.coordinator.textView else { return }
+        context.coordinator.parent = self
         textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
 
         if context.coordinator.lastFocusRequestID != self.focusRequestID {
@@ -267,7 +269,10 @@ struct OXQHighlightedEditor: NSViewRepresentable {
                 return
             }
 
-            let suggestions = autocomplete.suggestions(for: query, limit: OXQAutocompleteEngine.maxVisibleSuggestions)
+            let suggestions = autocomplete.suggestions(
+                for: query,
+                limit: OXQAutocompleteEngine.maxVisibleSuggestions,
+                resultRows: self.parent.resultRows)
             guard !suggestions.isEmpty else {
                 self.dismissSuggestionPopover()
                 return
@@ -462,6 +467,8 @@ private struct OXQSuggestionPopoverView: View {
             return "Roles"
         case .attribute:
             return "Attributes"
+        case .attributeValue:
+            return "Values"
         case .function:
             return "Functions"
         }
@@ -473,6 +480,8 @@ private struct OXQSuggestionPopoverView: View {
             return "ROLE"
         case .attribute:
             return "ATTR"
+        case .attributeValue:
+            return "VAL"
         case .function:
             return "FUNC"
         }
@@ -557,6 +566,7 @@ private struct OXQSuggestionPopoverView: View {
 private enum OXQCompletionDomain {
     case role
     case attribute
+    case attributeValue
     case function
 }
 
@@ -567,6 +577,7 @@ private struct OXQAutocompleteQuery {
     let previousRole: String?
     let hostRole: String?
     let previousAttribute: String?
+    let valueAttribute: String?
 }
 
 private enum OXQRoleCategory {
@@ -588,6 +599,13 @@ private struct OXQAutocompleteScanState {
     var roleHistory: [String] = []
     var attributeRoleStack: [String?] = []
     var attributeHistoryStack: [[String]] = []
+    var currentAttributeStack: [String?] = []
+    var stringContext: OXQAutocompleteStringContext?
+}
+
+private struct OXQAutocompleteStringContext {
+    let attributeName: String
+    let contentStartUTF16: Int
 }
 
 @MainActor
@@ -609,6 +627,23 @@ private struct OXQAutocompleteEngine {
         let prefix = (text as NSString).substring(with: prefixRange)
         let prefixStartIndex = String.Index(utf16Offset: prefixRange.location, in: text)
         let scanState = self.scanContext(in: text, upTo: prefixStartIndex)
+        if let stringContext = scanState.stringContext {
+            let contentStart = max(0, min(stringContext.contentStartUTF16, clampedCursor))
+            let replacementRange = NSRange(location: contentStart, length: max(0, clampedCursor - contentStart))
+            guard NSMaxRange(replacementRange) <= text.utf16.count else {
+                return nil
+            }
+
+            let valuePrefix = (text as NSString).substring(with: replacementRange)
+            return OXQAutocompleteQuery(
+                domain: .attributeValue,
+                prefix: valuePrefix,
+                replacementRange: replacementRange,
+                previousRole: scanState.roleHistory.last,
+                hostRole: scanState.attributeRoleStack.last ?? scanState.roleHistory.last,
+                previousAttribute: scanState.attributeHistoryStack.last?.last,
+                valueAttribute: stringContext.attributeName)
+        }
         if scanState.inStringLiteral {
             return nil
         }
@@ -635,7 +670,8 @@ private struct OXQAutocompleteEngine {
                 replacementRange: prefixRange,
                 previousRole: scanState.roleHistory.last,
                 hostRole: scanState.attributeRoleStack.last ?? scanState.roleHistory.last,
-                previousAttribute: previousAttribute)
+                previousAttribute: previousAttribute,
+                valueAttribute: nil)
 
         case .role:
             let previousBeforePrefix = self.previousNonWhitespaceCharacter(in: text, before: prefixStartIndex)
@@ -660,7 +696,8 @@ private struct OXQAutocompleteEngine {
                 replacementRange: prefixRange,
                 previousRole: previousRole,
                 hostRole: nil,
-                previousAttribute: nil)
+                previousAttribute: nil,
+                valueAttribute: nil)
 
         case .function:
             guard !prefix.isEmpty || allowEmptyRolePrefix else {
@@ -672,14 +709,15 @@ private struct OXQAutocompleteEngine {
                 replacementRange: prefixRange,
                 previousRole: nil,
                 hostRole: nil,
-                previousAttribute: nil)
+                previousAttribute: nil,
+                valueAttribute: nil)
 
         case .none:
             return nil
         }
     }
 
-    func suggestions(for query: OXQAutocompleteQuery, limit: Int) -> [String] {
+    func suggestions(for query: OXQAutocompleteQuery, limit: Int, resultRows: [QueryResultRow]) -> [String] {
         switch query.domain {
         case .role:
             return self.rankRoleSuggestions(
@@ -691,6 +729,15 @@ private struct OXQAutocompleteEngine {
                 prefix: query.prefix,
                 hostRole: query.hostRole,
                 previousAttribute: query.previousAttribute,
+                limit: limit)
+        case .attributeValue:
+            guard let valueAttribute = query.valueAttribute else {
+                return []
+            }
+            return self.rankAttributeValueSuggestions(
+                prefix: query.prefix,
+                attribute: valueAttribute,
+                resultRows: resultRows,
                 limit: limit)
         case .function:
             return self.rankFunctionSuggestions(prefix: query.prefix, limit: limit)
@@ -1055,6 +1102,135 @@ private struct OXQAutocompleteEngine {
         }
 
         return self.sortedTokens(scored: scored, limit: limit)
+    }
+
+    private func rankAttributeValueSuggestions(
+        prefix: String,
+        attribute: String,
+        resultRows: [QueryResultRow],
+        limit: Int) -> [String]
+    {
+        let normalizedAttribute = self.normalizedAttributeName(attribute)
+        guard !normalizedAttribute.isEmpty else {
+            return []
+        }
+
+        let lowerPrefix = prefix.lowercased()
+        var firstSeenOrder: [String: Int] = [:]
+        var frequencies: [String: Int] = [:]
+        var representativeValue: [String: String] = [:]
+        var orderCounter = 0
+
+        for row in resultRows {
+            let values = self.attributeValues(for: normalizedAttribute, row: row)
+            for value in values {
+                let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalizedValue.isEmpty else {
+                    continue
+                }
+
+                let key = normalizedValue.lowercased()
+                frequencies[key, default: 0] += 1
+                if firstSeenOrder[key] == nil {
+                    firstSeenOrder[key] = orderCounter
+                    representativeValue[key] = normalizedValue
+                    orderCounter += 1
+                }
+            }
+        }
+
+        guard !frequencies.isEmpty else {
+            return []
+        }
+
+        let scored: [(String, Int)] = representativeValue.compactMap { key, value in
+            guard let prefixScore = self.prefixMatchScore(token: value, lowerPrefix: lowerPrefix) else {
+                return nil
+            }
+
+            let frequency = frequencies[key] ?? 1
+            let frequencyBoost = min(220, frequency * 26)
+            let shortValueBoost = max(0, 60 - min(value.count, 60))
+            return (value, prefixScore + frequencyBoost + shortValueBoost)
+        }
+
+        let ordered = scored.sorted { lhs, rhs in
+            if lhs.1 != rhs.1 {
+                return lhs.1 > rhs.1
+            }
+            let lhsOrder = firstSeenOrder[lhs.0.lowercased()] ?? Int.max
+            let rhsOrder = firstSeenOrder[rhs.0.lowercased()] ?? Int.max
+            if lhsOrder != rhsOrder {
+                return lhsOrder < rhsOrder
+            }
+            return lhs.0.localizedCaseInsensitiveCompare(rhs.0) == .orderedAscending
+        }
+
+        return Array(ordered.prefix(limit).map(\.0))
+    }
+
+    private func normalizedAttributeName(_ attribute: String) -> String {
+        let trimmed = attribute.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return ""
+        }
+
+        switch trimmed.lowercased() {
+        case "cpname", "computedname":
+            return "cpname"
+        case AXMiscConstants.computedNameAttributeKey.lowercased():
+            return "cpname"
+        case AXAttributeNames.kAXTitleAttribute.lowercased(), "title":
+            return "title"
+        case AXAttributeNames.kAXValueAttribute.lowercased(), "value":
+            return "value"
+        case AXAttributeNames.kAXIdentifierAttribute.lowercased(), "id", "identifier":
+            return "identifier"
+        case AXAttributeNames.kAXDescriptionAttribute.lowercased(), "description":
+            return "description"
+        case AXAttributeNames.kAXRoleAttribute.lowercased(), "role":
+            return "role"
+        case AXAttributeNames.kAXSubroleAttribute.lowercased(), "subrole":
+            return "subrole"
+        case AXAttributeNames.kAXEnabledAttribute.lowercased(), "enabled":
+            return "enabled"
+        case AXAttributeNames.kAXFocusedAttribute.lowercased(), "focused":
+            return "focused"
+        default:
+            return trimmed.lowercased()
+        }
+    }
+
+    private func attributeValues(for normalizedAttribute: String, row: QueryResultRow) -> [String] {
+        switch normalizedAttribute {
+        case "cpname":
+            if row.nameSource == AXAttributeNames.kAXValueAttribute {
+                return [row.name, row.resultsDisplayName]
+            }
+            return [row.name]
+        case "title":
+            return [row.title].compactMap { $0 }
+        case "value":
+            if let value = row.value {
+                return [value]
+            }
+            if row.nameSource == AXAttributeNames.kAXValueAttribute {
+                return [row.name]
+            }
+            return []
+        case "identifier":
+            return [row.identifier].compactMap { $0 }
+        case "description":
+            return [row.descriptionText].compactMap { $0 }
+        case "role":
+            return [row.role]
+        case "enabled":
+            return [row.enabled.map { $0 ? "true" : "false" }].compactMap { $0 }
+        case "focused":
+            return [row.focused.map { $0 ? "true" : "false" }].compactMap { $0 }
+        default:
+            return []
+        }
     }
 
     private func prefixMatchScore(token: String, lowerPrefix: String) -> Int? {
@@ -1531,6 +1707,8 @@ private struct OXQAutocompleteEngine {
         var index = text.startIndex
         var activeQuote: Character?
         var escaped = false
+        var activeStringAttributeName: String?
+        var activeStringContentStartUTF16: Int?
 
         while index < cursor {
             let character = text[index]
@@ -1550,6 +1728,8 @@ private struct OXQAutocompleteEngine {
 
                 if character == quote {
                     activeQuote = nil
+                    activeStringAttributeName = nil
+                    activeStringContentStartUTF16 = nil
                 }
 
                 index = text.index(after: index)
@@ -1558,6 +1738,19 @@ private struct OXQAutocompleteEngine {
 
             if character == "\"" || character == "'" {
                 activeQuote = character
+                if state.attributeDepth > 0,
+                   let nestedAttributeName = state.currentAttributeStack.last,
+                   let attributeName = nestedAttributeName
+                {
+                    activeStringAttributeName = attributeName
+                    let contentStart = text.index(after: index)
+                    activeStringContentStartUTF16 = text.utf16.distance(
+                        from: text.utf16.startIndex,
+                        to: contentStart.samePosition(in: text.utf16) ?? text.utf16.endIndex)
+                } else {
+                    activeStringAttributeName = nil
+                    activeStringContentStartUTF16 = nil
+                }
                 index = text.index(after: index)
                 continue
             }
@@ -1567,6 +1760,7 @@ private struct OXQAutocompleteEngine {
                 state.expectingAttributeName = true
                 state.attributeRoleStack.append(state.roleHistory.last)
                 state.attributeHistoryStack.append([])
+                state.currentAttributeStack.append(nil)
                 index = text.index(after: index)
                 continue
             }
@@ -1581,6 +1775,9 @@ private struct OXQAutocompleteEngine {
                 if !state.attributeHistoryStack.isEmpty {
                     state.attributeHistoryStack.removeLast()
                 }
+                if !state.currentAttributeStack.isEmpty {
+                    state.currentAttributeStack.removeLast()
+                }
                 state.expectingAttributeName = false
                 index = text.index(after: index)
                 continue
@@ -1589,6 +1786,9 @@ private struct OXQAutocompleteEngine {
             if character == "," {
                 if state.attributeDepth > 0 {
                     state.expectingAttributeName = true
+                    if !state.currentAttributeStack.isEmpty {
+                        state.currentAttributeStack[state.currentAttributeStack.count - 1] = nil
+                    }
                 }
                 index = text.index(after: index)
                 continue
@@ -1610,6 +1810,9 @@ private struct OXQAutocompleteEngine {
                         if !state.attributeHistoryStack.isEmpty {
                             state.attributeHistoryStack[state.attributeHistoryStack.count - 1].append(token)
                         }
+                        if !state.currentAttributeStack.isEmpty {
+                            state.currentAttributeStack[state.currentAttributeStack.count - 1] = token
+                        }
                         state.expectingAttributeName = false
                     }
                 } else {
@@ -1627,6 +1830,14 @@ private struct OXQAutocompleteEngine {
         }
 
         state.inStringLiteral = activeQuote != nil
+        if state.inStringLiteral,
+           let activeStringAttributeName,
+           let activeStringContentStartUTF16
+        {
+            state.stringContext = OXQAutocompleteStringContext(
+                attributeName: activeStringAttributeName,
+                contentStartUTF16: activeStringContentStartUTF16)
+        }
         return state
     }
 

@@ -151,6 +151,7 @@ struct WorkbenchView: View {
                     .font(.headline)
                 OXQHighlightedEditor(
                     text: $model.selectorQuery,
+                    resultRows: model.allRows,
                     fontSize: 16,
                     focusRequestID: model.editorFocusRequestID,
                     onRunQuery: { model.runActiveEditorProgram() },
