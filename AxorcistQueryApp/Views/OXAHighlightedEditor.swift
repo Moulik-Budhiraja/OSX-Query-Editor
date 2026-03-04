@@ -86,6 +86,14 @@ struct OXAHighlightedEditor: NSViewRepresentable {
         private var selectedSuggestionIndex = 0
         private let autocomplete = OXAAutocompleteEngine()
         private let suggestionPopoverController = OXASuggestionPopoverController()
+        private static let autoClosingPairs: [Character: Character] = [
+            "[": "]",
+            "(": ")",
+            "{": "}",
+            "\"": "\"",
+            "'": "'",
+        ]
+        private static let autoClosingClosers: Set<Character> = ["]", ")", "}", "\"", "'"]
 
         init(parent: OXAHighlightedEditor) {
             self.parent = parent
@@ -118,6 +126,21 @@ struct OXAHighlightedEditor: NSViewRepresentable {
 
         func textView(
             _ textView: NSTextView,
+            shouldChangeTextIn affectedCharRange: NSRange,
+            replacementString: String?) -> Bool
+        {
+            if let replacementString,
+               replacementString.count == 1,
+               let typed = replacementString.first,
+               self.handleAutoClosingInsertion(typed, in: textView, affectedRange: affectedCharRange)
+            {
+                return false
+            }
+            return true
+        }
+
+        func textView(
+            _ textView: NSTextView,
             doCommandBy commandSelector: Selector) -> Bool
         {
             if self.isCommandModeToggle() {
@@ -132,6 +155,13 @@ struct OXAHighlightedEditor: NSViewRepresentable {
 
             if commandSelector == #selector(NSResponder.complete(_:)) {
                 self.scheduleAutocompleteRefresh(force: true)
+                return true
+            }
+
+            if commandSelector == #selector(NSResponder.insertTab(_:)),
+               self.currentSuggestions.isEmpty,
+               self.handleTabSkipOut(in: textView)
+            {
                 return true
             }
 
@@ -310,6 +340,68 @@ struct OXAHighlightedEditor: NSViewRepresentable {
             let cursor = String.Index(utf16Offset: offset, in: text)
             guard cursor > text.startIndex else { return nil }
             return text[text.index(before: cursor)]
+        }
+
+        private func character(atUTF16Offset offset: Int, in text: String) -> Character? {
+            guard offset >= 0, offset < text.utf16.count else { return nil }
+            let index = String.Index(utf16Offset: offset, in: text)
+            return text[index]
+        }
+
+        private func handleAutoClosingInsertion(
+            _ typed: Character,
+            in textView: NSTextView,
+            affectedRange: NSRange) -> Bool
+        {
+            let text = textView.string
+            guard affectedRange.location >= 0,
+                  NSMaxRange(affectedRange) <= text.utf16.count
+            else {
+                return false
+            }
+
+            if affectedRange.length == 0,
+               Self.autoClosingClosers.contains(typed),
+               let current = self.character(atUTF16Offset: affectedRange.location, in: text),
+               current == typed
+            {
+                textView.setSelectedRange(NSRange(location: affectedRange.location + 1, length: 0))
+                return true
+            }
+
+            guard affectedRange.length == 0,
+                  let closer = Self.autoClosingPairs[typed]
+            else {
+                return false
+            }
+
+            if (typed == "\"" || typed == "'"),
+               self.character(beforeUTF16Offset: affectedRange.location, in: text) == "\\"
+            {
+                return false
+            }
+
+            let insertion = String([typed, closer])
+            textView.textStorage?.replaceCharacters(in: affectedRange, with: insertion)
+            textView.setSelectedRange(NSRange(location: affectedRange.location + 1, length: 0))
+            textView.didChangeText()
+            return true
+        }
+
+        private func handleTabSkipOut(in textView: NSTextView) -> Bool {
+            let selected = textView.selectedRange()
+            guard selected.length == 0 else {
+                return false
+            }
+            guard let current = self.character(atUTF16Offset: selected.location, in: textView.string),
+                  Self.autoClosingClosers.contains(current)
+            else {
+                return false
+            }
+
+            textView.setSelectedRange(NSRange(location: selected.location + 1, length: 0))
+            self.dismissSuggestionPopover()
+            return true
         }
 
         private func updateSuggestionPopover() {
