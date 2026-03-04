@@ -146,8 +146,12 @@ struct OXAParser {
 
             while !self.isEOF {
                 let statement = try self.parseStatement()
-                try self.expectSemicolon()
                 statements.append(statement)
+                if self.isEOF {
+                    // Infer the trailing semicolon when the final statement reaches EOF cleanly.
+                    break
+                }
+                try self.expectSemicolon()
             }
 
             return OXAProgram(statements: statements)
