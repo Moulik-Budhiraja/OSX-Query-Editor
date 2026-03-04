@@ -7,6 +7,7 @@ struct OXAHighlightedEditor: NSViewRepresentable {
     var fontSize: CGFloat = 16
     var focusRequestID: UInt64 = 0
     var onRunAction: (() -> Void)?
+    var onToggleMode: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -94,6 +95,10 @@ struct OXAHighlightedEditor: NSViewRepresentable {
             _ textView: NSTextView,
             doCommandBy commandSelector: Selector) -> Bool
         {
+            if self.isCommandModeToggle() {
+                self.parent.onToggleMode?()
+                return true
+            }
             if self.isCommandEnter(commandSelector) {
                 self.parent.onRunAction?()
                 return true
@@ -126,6 +131,17 @@ struct OXAHighlightedEditor: NSViewRepresentable {
 
             let flags = NSApp.currentEvent?.modifierFlags ?? []
             return flags.contains(.command)
+        }
+
+        private func isCommandModeToggle() -> Bool {
+            guard let event = NSApp.currentEvent, event.type == .keyDown else {
+                return false
+            }
+            let flags = event.modifierFlags
+            guard flags.contains(.command) else {
+                return false
+            }
+            return event.charactersIgnoringModifiers?.lowercased() == "i"
         }
 
         func focusTextView() {

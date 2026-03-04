@@ -115,7 +115,7 @@ struct WorkbenchView: View {
                 .frame(width: 180)
 
                 Button {
-                    model.requestEditorFocus()
+                    model.toggleEditorMode()
                 } label: {
                     Text("⌘I")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -127,7 +127,7 @@ struct WorkbenchView: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut("i", modifiers: [.command])
-                .help("Focus editor")
+                .help("Toggle Query/Action mode")
 
                 Spacer()
                 Button(model.editorMode == .query ? "Run Query" : "Run Action") {
@@ -153,7 +153,8 @@ struct WorkbenchView: View {
                     text: $model.selectorQuery,
                     fontSize: 16,
                     focusRequestID: model.editorFocusRequestID,
-                    onRunQuery: { model.runActiveEditorProgram() })
+                    onRunQuery: { model.runActiveEditorProgram() },
+                    onToggleMode: { model.toggleEditorMode() })
                     .frame(minHeight: 140)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             } else {
@@ -163,7 +164,8 @@ struct WorkbenchView: View {
                     text: $model.actionProgram,
                     fontSize: 16,
                     focusRequestID: model.editorFocusRequestID,
-                    onRunAction: { model.runActiveEditorProgram() })
+                    onRunAction: { model.runActiveEditorProgram() },
+                    onToggleMode: { model.toggleEditorMode() })
                     .frame(minHeight: 140)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
             }

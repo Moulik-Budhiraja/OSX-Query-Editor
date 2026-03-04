@@ -184,6 +184,11 @@ final class WorkbenchViewModel: ObservableObject {
         }
     }
 
+    func toggleEditorMode() {
+        self.editorMode = (self.editorMode == .query) ? .action : .query
+        self.requestEditorFocus()
+    }
+
     func requestEditorFocus() {
         self.editorFocusRequestID &+= 1
     }
