@@ -11,10 +11,11 @@ final class WorkbenchViewModel: ObservableObject {
     }
 
     @Published var appIdentifier = "focused"
+    @Published var editorMode: WorkbenchEditorMode = .query
     @Published var selectorQuery = "AXButton[AXTitle*=\"Run\"]"
+    @Published var actionProgram = ""
     @Published var maxDepthText = ""
     @Published var searchText = ""
-    @Published var interactionValue = ""
     @Published var showResultOverlays = false
     @Published private(set) var hoveredRowID: QueryResultRow.ID?
 
@@ -106,6 +107,13 @@ final class WorkbenchViewModel: ObservableObject {
         self.overlayManager.setExternalHighlightedRowID(rowID)
     }
 
+    func copyReferenceToClipboard(_ reference: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(reference, forType: .string)
+        self.statusMessage = "Copied ref \(reference)."
+    }
+
     func handleAppIdentifierChanged() {
         self.typingDebounceTask?.cancel()
         self.appWarmDebounceTask?.cancel()
@@ -126,16 +134,36 @@ final class WorkbenchViewModel: ObservableObject {
             do {
                 let request = try self.makeRequest()
                 try self.service.warmCache(request: request)
-                self.queueTypingQueryRuns()
+                if self.editorMode == .query {
+                    self.queueTypingQueryRuns()
+                }
             } catch {
                 // Suppress warm-up errors during app id typing.
             }
         }
     }
 
+    func handleEditorModeChanged() {
+        self.typingDebounceTask?.cancel()
+        self.bumpQueryRunToken()
+    }
+
     func handleSelectorQueryChanged() {
+        guard self.editorMode == .query else {
+            return
+        }
+
         self.typingDebounceTask?.cancel()
         self.queueTypingQueryRuns()
+    }
+
+    func runActiveEditorProgram() {
+        switch self.editorMode {
+        case .query:
+            self.runQuery()
+        case .action:
+            self.runActionProgram()
+        }
     }
 
     func runQuery() {
@@ -149,40 +177,33 @@ final class WorkbenchViewModel: ObservableObject {
             runToken: runToken)
     }
 
-    func performInteraction(_ action: SelectorInteractionKind) {
-        guard let selected = self.selectedRow else {
-            self.errorMessage = "Select a result first."
+    func runActionProgram() {
+        self.typingDebounceTask?.cancel()
+        self.appWarmDebounceTask?.cancel()
+        self.bumpAppWarmToken()
+        self.bumpQueryRunToken()
+
+        let trimmedProgram = self.actionProgram.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedProgram.isEmpty else {
+            self.errorMessage = "Action program is empty."
+            self.statusMessage = "Action failed"
             return
         }
 
+        self.errorMessage = nil
+        self.isRunning = true
+        defer {
+            self.isRunning = false
+        }
+
         do {
-            let request = try self.makeRequest()
-            let rawValue = interactionValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let interaction = QueryInteractionRequest(
-                resultIndex: selected.index,
-                action: action,
-                value: action.requiresValue ? rawValue : nil)
-
-            self.typingDebounceTask?.cancel()
-            self.appWarmDebounceTask?.cancel()
-            self.bumpAppWarmToken()
+            let output = try OXAExecutor.execute(programSource: trimmedProgram)
             self.service.invalidateWarmCache()
-            self.bumpQueryRunToken()
-            self.errorMessage = nil
-            self.isRunning = true
-
-            let result = try service.run(
-                request: request,
-                mode: .liveRefresh,
-                interaction: interaction)
-            self.apply(result: result)
-            self.selectedRowID = selected.id
-            self.statusMessage = "Interaction '\(action.rawValue)' succeeded on result \(selected.index)."
-            self.isRunning = false
+            let firstLine = output.split(separator: "\n").first.map(String.init) ?? "Action complete."
+            self.statusMessage = firstLine
         } catch {
-            self.isRunning = false
             self.errorMessage = error.localizedDescription
-            self.statusMessage = "Interaction failed"
+            self.statusMessage = "Action failed"
         }
     }
 

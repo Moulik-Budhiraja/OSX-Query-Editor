@@ -1,24 +1,11 @@
 import AXorcist
 import Foundation
 
-enum SelectorInteractionKind: String, CaseIterable, Identifiable {
-    case click
-    case press
-    case focus
-    case setValue = "set-value"
-    case setValueSubmit = "set-value-submit"
-    case sendKeystrokesSubmit = "send-keystrokes-submit"
+enum WorkbenchEditorMode: String, CaseIterable, Identifiable {
+    case query
+    case action
 
     var id: String { rawValue }
-
-    var requiresValue: Bool {
-        switch self {
-        case .setValue, .setValueSubmit, .sendKeystrokesSubmit:
-            true
-        default:
-            false
-        }
-    }
 }
 
 struct RunningAppOption: Identifiable, Hashable {
@@ -43,12 +30,6 @@ enum QueryExecutionMode {
     case useWarmCache
 }
 
-struct QueryInteractionRequest {
-    let resultIndex: Int
-    let action: SelectorInteractionKind
-    let value: String?
-}
-
 struct QueryStats {
     let elapsedMilliseconds: Double
     let usedWarmCache: Bool
@@ -69,6 +50,7 @@ struct QueryResultRow: Identifiable {
     let value: String?
     let identifier: String?
     let descriptionText: String?
+    let reference: String?
     let enabled: Bool?
     let focused: Bool?
     let childCount: Int?
@@ -101,6 +83,7 @@ struct QueryResultRow: Identifiable {
             title,
             value,
             identifier,
+            reference,
             descriptionText,
             path,
         ]
@@ -120,9 +103,6 @@ enum QueryWorkbenchError: LocalizedError {
     case selfTargetUnsupported
     case focusedAppUnavailable
     case applicationNotFound(String)
-    case interactionTargetOutOfBounds(index: Int, matchedCount: Int)
-    case interactionFailed(action: String, index: Int)
-    case interactionValueRequired(SelectorInteractionKind)
 
     var errorDescription: String? {
         switch self {
@@ -138,12 +118,6 @@ enum QueryWorkbenchError: LocalizedError {
             return "Focused app resolved to Axorcist Query App. Focus another app first, then run the query."
         case let .applicationNotFound(identifier):
             return "Could not find a running app for '\(identifier)'."
-        case let .interactionTargetOutOfBounds(index, matchedCount):
-            return "Result index \(index) is out of bounds for \(matchedCount) matches."
-        case let .interactionFailed(action, index):
-            return "Interaction '\(action)' failed for result \(index)."
-        case let .interactionValueRequired(action):
-            return "A value is required for '\(action.rawValue)'."
         }
     }
 }

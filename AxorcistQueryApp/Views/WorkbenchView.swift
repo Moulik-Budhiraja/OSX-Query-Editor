@@ -30,6 +30,9 @@ struct WorkbenchView: View {
         .onChange(of: model.appIdentifier) { _, _ in
             model.handleAppIdentifierChanged()
         }
+        .onChange(of: model.editorMode) { _, _ in
+            model.handleEditorModeChanged()
+        }
         .onChange(of: model.selectorQuery) { _, _ in
             model.handleSelectorQueryChanged()
         }
@@ -100,22 +103,39 @@ struct WorkbenchView: View {
     private var queryEditor: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Selector Query")
-                    .font(.headline)
+                Picker("Mode", selection: $model.editorMode) {
+                    Text("Query").tag(WorkbenchEditorMode.query)
+                    Text("Action").tag(WorkbenchEditorMode.action)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 180)
                 Spacer()
-                Button("Run Query") {
-                    model.runQuery()
+                Button(model.editorMode == .query ? "Run Query" : "Run Action") {
+                    model.runActiveEditorProgram()
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(model.isRunning)
             }
 
-            OXQHighlightedEditor(
-                text: $model.selectorQuery,
-                fontSize: 16,
-                onRunQuery: { model.runQuery() })
-                .frame(minHeight: 140)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+            if model.editorMode == .query {
+                Text("Selector Query")
+                    .font(.headline)
+                OXQHighlightedEditor(
+                    text: $model.selectorQuery,
+                    fontSize: 16,
+                    onRunQuery: { model.runActiveEditorProgram() })
+                    .frame(minHeight: 140)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            } else {
+                Text("Action Program")
+                    .font(.headline)
+                OXAHighlightedEditor(
+                    text: $model.actionProgram,
+                    fontSize: 16,
+                    onRunAction: { model.runActiveEditorProgram() })
+                    .frame(minHeight: 140)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
         }
         .padding(14)
     }
@@ -146,6 +166,20 @@ struct WorkbenchView: View {
                         Text(String(format: "%4d", row.index))
                             .foregroundStyle(.secondary)
                             .frame(width: 44, alignment: .trailing)
+
+                        if let reference = row.reference {
+                            Button(reference) {
+                                model.copyReferenceToClipboard(reference)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 76, alignment: .leading)
+                        } else {
+                            Text("-")
+                                .foregroundStyle(.secondary)
+                                .frame(width: 76, alignment: .leading)
+                        }
 
                         Text(row.role)
                             .foregroundStyle(
@@ -191,7 +225,6 @@ struct WorkbenchView: View {
             VStack(alignment: .leading, spacing: 14) {
                 statsPanel
                 selectedElementPanel
-                interactionPanel
             }
             .padding(14)
         }
@@ -219,6 +252,7 @@ struct WorkbenchView: View {
             if let row = model.selectedRow {
                 VStack(alignment: .leading, spacing: 6) {
                     statLine("Index", "\(row.index)")
+                    statLine("Ref", row.reference ?? "")
                     statLine("Role", row.role)
                     statLine("Name", row.name)
                     statLine("Name Source", row.nameSource ?? "")
@@ -242,44 +276,6 @@ struct WorkbenchView: View {
             } else {
                 Text("Select a result to inspect details.")
                     .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var interactionPanel: some View {
-        GroupBox("Interactions") {
-            VStack(alignment: .leading, spacing: 10) {
-                TextField("Value for set-value / submit actions", text: $model.interactionValue)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(model.selectedRow == nil)
-
-                HStack {
-                    Button("Click") {
-                        model.performInteraction(.click)
-                    }
-                    Button("Press") {
-                        model.performInteraction(.press)
-                    }
-                    Button("Focus") {
-                        model.performInteraction(.focus)
-                    }
-                }
-                .disabled(model.selectedRow == nil || model.isRunning)
-
-                HStack {
-                    Button("Set Value") {
-                        model.performInteraction(.setValue)
-                    }
-                    Button("Set Value + Return") {
-                        model.performInteraction(.setValueSubmit)
-                    }
-                }
-                .disabled(model.selectedRow == nil || model.isRunning)
-
-                Button("Send Keystrokes + Cmd+Return") {
-                    model.performInteraction(.sendKeystrokesSubmit)
-                }
-                .disabled(model.selectedRow == nil || model.isRunning)
             }
         }
     }

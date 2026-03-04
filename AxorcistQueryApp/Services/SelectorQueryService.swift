@@ -12,8 +12,16 @@ final class SelectorQueryService {
         let childrenByElement: [Element: [Element]]
         let parentByElement: [Element: Element]
         let roleByElement: [Element: String]
+        let frameByElement: [Element: CGRect]
         let attributeValuesByElement: [Element: [String: String]]
         let prefetchedAttributeNames: Set<String>
+        let elementsByReference: [String: Element]
+    }
+
+    private struct SnapshotReferenceMetadata {
+        let frameByReference: [String: CGRect]
+        let parentReferenceByReference: [String: String]
+        let roleByReference: [String: String]
     }
 
     private struct QueryExecutionContext {
@@ -29,17 +37,17 @@ final class SelectorQueryService {
         let snapshot: SelectorPrefetchSnapshot
     }
 
-    private let setValueSubmitStepDelaySeconds: TimeInterval = 0.2
-    private let sendKeystrokesSubmitStepDelaySeconds: TimeInterval = 0.3
-    private let postActivationClickDelaySeconds: TimeInterval = 0.2
-    private let textInputFocusRetryDelaySeconds: TimeInterval = 0.2
-    private let textInputFocusRetryMaxAttempts = 7
+    private struct BatchFetchResult {
+        let stringValues: [String: String]
+        let frame: CGRect?
+    }
+
+    private static let cacheReferenceAttributeName = "__axorc_ref"
     private var warmCacheState: WarmCacheState?
 
     func run(
         request: QueryRequest,
-        mode: QueryExecutionMode = .liveRefresh,
-        interaction: QueryInteractionRequest? = nil) throws -> QueryExecutionResult
+        mode: QueryExecutionMode = .liveRefresh) throws -> QueryExecutionResult
     {
         let appIdentifier = request.appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
         let selector = request.selector.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -57,9 +65,9 @@ final class SelectorQueryService {
         let startedAt = DispatchTime.now().uptimeNanoseconds
         let syntaxTree = try OXQParser().parse(selector)
         let requiredAttributeNames = Self.prefetchAttributeNames(for: syntaxTree)
-        let executionMode: QueryExecutionMode = interaction == nil ? mode : .liveRefresh
+
         let context: QueryExecutionContext
-        if executionMode == .useWarmCache,
+        if mode == .useWarmCache,
            let warmSnapshot = self.usableWarmCache(
                for: appIdentifier,
                maxDepth: request.maxDepth,
@@ -84,13 +92,6 @@ final class SelectorQueryService {
             maxDepth: request.maxDepth,
             memoizationContext: context.memoizationContext)
 
-        if let interaction {
-            try self.performInteraction(
-                interaction,
-                matchedElements: evaluation.matches)
-            self.invalidateWarmCache()
-        }
-
         let rows = evaluation.matches.enumerated().map { index, element in
             self.buildRow(
                 element: element,
@@ -99,13 +100,22 @@ final class SelectorQueryService {
                 snapshot: context.snapshot,
                 useLiveFrame: !context.isWarmCached)
         }
+
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds &- startedAt) / 1_000_000.0
 
-        if interaction == nil, !context.isWarmCached {
+        if !context.isWarmCached {
             self.warmCacheState = WarmCacheState(
                 appIdentifier: Self.cacheKey(for: appIdentifier),
                 snapshot: context.snapshot)
         }
+
+        let referenceMetadata = Self.referenceMetadata(from: context.snapshot)
+        SelectorActionRefStore.replace(
+            with: context.snapshot.elementsByReference,
+            appPID: context.snapshot.appPID,
+            frameByReference: referenceMetadata.frameByReference,
+            parentReferenceByReference: referenceMetadata.parentReferenceByReference,
+            roleByReference: referenceMetadata.roleByReference)
 
         return QueryExecutionResult(
             stats: QueryStats(
@@ -137,6 +147,7 @@ final class SelectorQueryService {
             root: root,
             maxDepth: request.maxDepth,
             attributeNames: requiredAttributeNames)
+
         self.warmCacheState = WarmCacheState(
             appIdentifier: Self.cacheKey(for: appIdentifier),
             snapshot: snapshot)
@@ -144,6 +155,7 @@ final class SelectorQueryService {
 
     func invalidateWarmCache() {
         self.warmCacheState = nil
+        SelectorActionRefStore.clear()
     }
 
     private func makeExecutionContext(
@@ -279,13 +291,14 @@ final class SelectorQueryService {
             id: index,
             index: index,
             role: role,
-            frame: useLiveFrame ? Self.visibleFrame(for: element) : nil,
+            frame: useLiveFrame ? Self.visibleFrame(for: element) : snapshot.frameByElement[element],
             name: resultName,
             nameSource: resultNameSource,
             title: title,
             value: resultValue,
             identifier: identifier,
             descriptionText: descriptionText,
+            reference: Self.referenceForElement(element, snapshot: snapshot),
             enabled: enabled,
             focused: focused,
             childCount: memoizationContext.children(of: element).count,
@@ -334,17 +347,21 @@ final class SelectorQueryService {
         var childrenByElement: [Element: [Element]] = [:]
         var parentByElement: [Element: Element] = [:]
         var roleByElement: [Element: String] = [:]
+        var frameByElement: [Element: CGRect] = [:]
         var attributeValuesByElement: [Element: [String: String]] = [:]
         var bestDepthByElement: [Element: Int] = [:]
+        var elementsByReference: [String: Element] = [:]
+        var generatedReferences: Set<String> = []
         var stack: [(element: Element, depth: Int, parent: Element?)] = [(root, 0, nil)]
 
         while let entry = stack.popLast() {
             let element = entry.element
             let depth = entry.depth
-
-            if let parent = entry.parent {
-                parentByElement[element] = parent
-            }
+            let reference = Self.ensureSnapshotReference(
+                for: element,
+                attributeValuesByElement: &attributeValuesByElement,
+                elementsByReference: &elementsByReference,
+                generatedReferences: &generatedReferences)
 
             if let bestDepth = bestDepthByElement[element], depth >= bestDepth {
                 continue
@@ -352,14 +369,26 @@ final class SelectorQueryService {
 
             bestDepthByElement[element] = depth
 
-            let prefetchedAttributes = Self.batchFetchAttributeValues(
+            if let parent = entry.parent {
+                parentByElement[element] = parent
+            } else {
+                parentByElement.removeValue(forKey: element)
+            }
+
+            let prefetched = Self.batchFetchAttributeValues(
                 for: element,
                 attributeNames: orderedAttributeNames)
+            let prefetchedAttributes = prefetched.stringValues
             var attributes = attributeValuesByElement[element] ?? [:]
             if !prefetchedAttributes.isEmpty {
                 attributes.merge(prefetchedAttributes) { _, new in new }
             }
+            attributes[Self.cacheReferenceAttributeName] = reference
             attributeValuesByElement[element] = attributes
+
+            if let frame = prefetched.frame {
+                frameByElement[element] = frame
+            }
 
             if let role = prefetchedAttributes[AXAttributeNames.kAXRoleAttribute] ??
                 Self.stringValue(for: element, attributeName: AXAttributeNames.kAXRoleAttribute)
@@ -390,17 +419,22 @@ final class SelectorQueryService {
             childrenByElement: childrenByElement,
             parentByElement: parentByElement,
             roleByElement: roleByElement,
+            frameByElement: frameByElement,
             attributeValuesByElement: attributeValuesByElement,
-            prefetchedAttributeNames: attributeNames)
+            prefetchedAttributeNames: attributeNames,
+            elementsByReference: elementsByReference)
     }
 
     private static func batchFetchAttributeValues(
         for element: Element,
-        attributeNames: [String]) -> [String: String]
+        attributeNames: [String]) -> BatchFetchResult
     {
         guard !attributeNames.isEmpty else {
-            return [:]
+            return BatchFetchResult(stringValues: [:], frame: nil)
         }
+
+        let positionIndex = attributeNames.firstIndex(of: AXAttributeNames.kAXPositionAttribute)
+        let sizeIndex = attributeNames.firstIndex(of: AXAttributeNames.kAXSizeAttribute)
 
         let cfAttributeNames = attributeNames.map { $0 as CFString } as CFArray
         var values: CFArray?
@@ -417,7 +451,7 @@ final class SelectorQueryService {
                     fallbackValues[name] = value
                 }
             }
-            return fallbackValues
+            return BatchFetchResult(stringValues: fallbackValues, frame: element.frame())
         }
 
         var result: [String: String] = [:]
@@ -437,7 +471,117 @@ final class SelectorQueryService {
             }
         }
 
-        return result
+        let origin = positionIndex
+            .flatMap { $0 < rawValues.count ? Self.extractPoint(from: rawValues[$0]) : nil }
+        let size = sizeIndex
+            .flatMap { $0 < rawValues.count ? Self.extractSize(from: rawValues[$0]) : nil }
+        let frame = origin.flatMap { origin in
+            size.map { size in CGRect(origin: origin, size: size) }
+        } ?? element.frame()
+
+        return BatchFetchResult(stringValues: result, frame: frame)
+    }
+
+    private static func extractPoint(from value: Any) -> CGPoint? {
+        let object = value as AnyObject
+        let typeRef = object as CFTypeRef
+        guard CFGetTypeID(typeRef) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        let axValue = unsafeDowncast(object, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cgPoint else {
+            return nil
+        }
+
+        var point = CGPoint.zero
+        guard AXValueGetValue(axValue, .cgPoint, &point) else {
+            return nil
+        }
+        return point
+    }
+
+    private static func extractSize(from value: Any) -> CGSize? {
+        let object = value as AnyObject
+        let typeRef = object as CFTypeRef
+        guard CFGetTypeID(typeRef) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        let axValue = unsafeDowncast(object, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cgSize else {
+            return nil
+        }
+
+        var size = CGSize.zero
+        guard AXValueGetValue(axValue, .cgSize, &size) else {
+            return nil
+        }
+        return size
+    }
+
+    private static func referenceMetadata(from snapshot: SelectorPrefetchSnapshot) -> SnapshotReferenceMetadata {
+        var frameByReference: [String: CGRect] = [:]
+        var parentReferenceByReference: [String: String] = [:]
+        var roleByReference: [String: String] = [:]
+
+        for (reference, element) in snapshot.elementsByReference {
+            let normalizedReference = reference.lowercased()
+
+            if let frame = snapshot.frameByElement[element] {
+                frameByReference[normalizedReference] = frame
+            }
+
+            if let parent = snapshot.parentByElement[element],
+               let parentReference = snapshot.attributeValuesByElement[parent]?[Self.cacheReferenceAttributeName]
+            {
+                parentReferenceByReference[normalizedReference] = parentReference.lowercased()
+            }
+
+            if let role = snapshot.roleByElement[element] ??
+                snapshot.attributeValuesByElement[element]?[AXAttributeNames.kAXRoleAttribute]
+            {
+                roleByReference[normalizedReference] = role
+            }
+        }
+
+        return SnapshotReferenceMetadata(
+            frameByReference: frameByReference,
+            parentReferenceByReference: parentReferenceByReference,
+            roleByReference: roleByReference)
+    }
+
+    private static func referenceForElement(_ element: Element, snapshot: SelectorPrefetchSnapshot) -> String? {
+        snapshot.attributeValuesByElement[element]?[Self.cacheReferenceAttributeName]
+    }
+
+    private static func generateUniqueReference(existing: inout Set<String>) -> String {
+        while true {
+            let raw = UInt64.random(in: 0..<(1 << 36))
+            let candidate = String(format: "%09llx", raw)
+            if existing.insert(candidate).inserted {
+                return candidate
+            }
+        }
+    }
+
+    private static func ensureSnapshotReference(
+        for element: Element,
+        attributeValuesByElement: inout [Element: [String: String]],
+        elementsByReference: inout [String: Element],
+        generatedReferences: inout Set<String>) -> String
+    {
+        var attributes = attributeValuesByElement[element] ?? [:]
+        if let existing = attributes[Self.cacheReferenceAttributeName] {
+            elementsByReference[existing] = element
+            return existing
+        }
+
+        let reference = Self.generateUniqueReference(existing: &generatedReferences)
+        attributes[Self.cacheReferenceAttributeName] = reference
+        attributeValuesByElement[element] = attributes
+        elementsByReference[reference] = element
+        return reference
     }
 
     private static func stringifyBatchAttributeValue(_ value: Any) -> String? {
@@ -472,6 +616,8 @@ final class SelectorQueryService {
             AXAttributeNames.kAXSubroleAttribute,
             AXAttributeNames.kAXPIDAttribute,
             AXAttributeNames.kAXRoleDescriptionAttribute,
+            AXAttributeNames.kAXPositionAttribute,
+            AXAttributeNames.kAXSizeAttribute,
         ]
 
         for selector in syntaxTree.selectors {
@@ -572,93 +718,6 @@ final class SelectorQueryService {
         }
 
         return frame
-    }
-
-    private func performInteraction(
-        _ interaction: QueryInteractionRequest,
-        matchedElements: [Element]) throws
-    {
-        guard interaction.resultIndex > 0, interaction.resultIndex <= matchedElements.count else {
-            throw QueryWorkbenchError.interactionTargetOutOfBounds(
-                index: interaction.resultIndex,
-                matchedCount: matchedElements.count)
-        }
-
-        let targetElement = matchedElements[interaction.resultIndex - 1]
-
-        let succeeded: Bool
-        switch interaction.action {
-        case .click:
-            succeeded = self.clickElement(targetElement)
-
-        case .press:
-            succeeded = targetElement.press()
-
-        case .focus:
-            succeeded = self.focusElement(targetElement)
-
-        case .setValue:
-            guard let value = interaction.value, !value.isEmpty else {
-                throw QueryWorkbenchError.interactionValueRequired(.setValue)
-            }
-            succeeded = targetElement.setValue(value, forAttribute: AXAttributeNames.kAXValueAttribute)
-
-        case .setValueSubmit:
-            guard let value = interaction.value, !value.isEmpty else {
-                throw QueryWorkbenchError.interactionValueRequired(.setValueSubmit)
-            }
-
-            guard self.clickForSetValueSubmit(targetElement) else {
-                succeeded = false
-                break
-            }
-
-            Thread.sleep(forTimeInterval: self.setValueSubmitStepDelaySeconds)
-            guard targetElement.setValue(value, forAttribute: AXAttributeNames.kAXValueAttribute) else {
-                succeeded = false
-                break
-            }
-
-            Thread.sleep(forTimeInterval: self.setValueSubmitStepDelaySeconds)
-            do {
-                try Element.typeKey(.return)
-                succeeded = true
-            } catch {
-                succeeded = false
-            }
-
-        case .sendKeystrokesSubmit:
-            guard let value = interaction.value, !value.isEmpty else {
-                throw QueryWorkbenchError.interactionValueRequired(.sendKeystrokesSubmit)
-            }
-
-            guard self.clickForSendKeystrokesSubmit(targetElement) else {
-                succeeded = false
-                break
-            }
-
-            Thread.sleep(forTimeInterval: self.sendKeystrokesSubmitStepDelaySeconds)
-            do {
-                try Element.typeText(value, delay: 0)
-            } catch {
-                succeeded = false
-                break
-            }
-
-            Thread.sleep(forTimeInterval: self.sendKeystrokesSubmitStepDelaySeconds)
-            do {
-                try Element.typeKey(.return, modifiers: [.maskCommand])
-                succeeded = true
-            } catch {
-                succeeded = false
-            }
-        }
-
-        guard succeeded else {
-            throw QueryWorkbenchError.interactionFailed(
-                action: interaction.action.rawValue,
-                index: interaction.resultIndex)
-        }
     }
 
     private func resolveRootElement(appIdentifier: String) throws -> Element? {
@@ -768,114 +827,6 @@ final class SelectorQueryService {
             return false
         default:
             return nil
-        }
-    }
-
-    private func focusElement(_ element: Element) -> Bool {
-        if element.setValue(true, forAttribute: AXAttributeNames.kAXFocusedAttribute) {
-            return true
-        }
-        if element.press() {
-            return true
-        }
-        return self.clickElement(element)
-    }
-
-    private func clickElement(_ element: Element) -> Bool {
-        if self.activateOwningApplication(for: element) {
-            Thread.sleep(forTimeInterval: self.postActivationClickDelaySeconds)
-        }
-        return ((try? element.click()) != nil)
-    }
-
-    private func activateOwningApplication(for element: Element) -> Bool {
-        guard let pid = self.owningPID(for: element) else {
-            return false
-        }
-
-        guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
-            return false
-        }
-
-        if app.isActive {
-            return true
-        }
-
-        return app.activate(options: [.activateAllWindows])
-    }
-
-    private func owningPID(for element: Element) -> pid_t? {
-        if let pid = element.pid(), pid > 0 {
-            return pid
-        }
-
-        var current = element.parent()
-        var depth = 0
-        while let candidate = current, depth < 256 {
-            if let pid = candidate.pid(), pid > 0 {
-                return pid
-            }
-            current = candidate.parent()
-            depth += 1
-        }
-
-        return nil
-    }
-
-    private func clickForSetValueSubmit(_ element: Element) -> Bool {
-        if self.shouldRetryFocusClicks(for: element) {
-            return self.clickUntilFocused(element)
-        }
-        return self.clickElement(element)
-    }
-
-    private func clickForSendKeystrokesSubmit(_ element: Element) -> Bool {
-        if self.shouldRetryFocusClicks(for: element) {
-            return self.clickUntilFocused(element)
-        }
-
-        guard self.clickElement(element) else {
-            return false
-        }
-        Thread.sleep(forTimeInterval: self.sendKeystrokesSubmitStepDelaySeconds)
-        return self.clickElement(element)
-    }
-
-    private func clickUntilFocused(_ element: Element) -> Bool {
-        if self.activateOwningApplication(for: element) {
-            Thread.sleep(forTimeInterval: self.postActivationClickDelaySeconds)
-        }
-
-        for attempt in 1...self.textInputFocusRetryMaxAttempts {
-            guard ((try? element.click()) != nil) else {
-                if attempt < self.textInputFocusRetryMaxAttempts {
-                    Thread.sleep(forTimeInterval: self.textInputFocusRetryDelaySeconds)
-                }
-                continue
-            }
-
-            if element.isFocused() == true {
-                return true
-            }
-
-            if attempt < self.textInputFocusRetryMaxAttempts {
-                Thread.sleep(forTimeInterval: self.textInputFocusRetryDelaySeconds)
-            }
-        }
-
-        return false
-    }
-
-    private func shouldRetryFocusClicks(for element: Element) -> Bool {
-        guard let role = element.role() else {
-            return false
-        }
-
-        switch role {
-        case AXRoleNames.kAXComboBoxRole, AXRoleNames.kAXTextFieldRole, AXRoleNames.kAXTextAreaRole:
-            return true
-        default:
-            return false
         }
     }
 
