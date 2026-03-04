@@ -41,6 +41,7 @@ final class WorkbenchViewModel: ObservableObject {
     @Published private(set) var selectedAttributeDetails: [QueryAttributeDetail] = []
     @Published private(set) var selectedAttributesError: String?
     @Published private(set) var isLoadingSelectedAttributes = false
+    @Published private(set) var actionBundleIdentifiers: [String] = []
     @Published private(set) var statusMessage = "Ready"
     @Published private(set) var errorMessage: String?
     @Published private(set) var isRunning = false
@@ -61,6 +62,11 @@ final class WorkbenchViewModel: ObservableObject {
     init() {
         self.overlayManager.onOverlayHoverChanged = { [weak self] rowID in
             self?.setOverlayHoveredRowID(rowID)
+        }
+
+        Task {
+            let identifiers = await OXAAppBundleIndex.shared.preload()
+            self.actionBundleIdentifiers = identifiers
         }
     }
 
@@ -103,6 +109,12 @@ final class WorkbenchViewModel: ObservableObject {
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
 
         runningApps = apps
+
+        let runningBundleIdentifiers = apps.compactMap(\.bundleIdentifier)
+        Task {
+            let identifiers = await OXAAppBundleIndex.shared.absorbRunning(bundleIdentifiers: runningBundleIdentifiers)
+            self.actionBundleIdentifiers = identifiers
+        }
     }
 
     func useFrontmostApp() {
@@ -245,6 +257,7 @@ final class WorkbenchViewModel: ObservableObject {
 
         do {
             let output = try OXAExecutor.execute(programSource: trimmedProgram)
+            self.recordBundleIdentifierRecency(from: trimmedProgram)
             let firstLine = output.split(separator: "\n").first.map(String.init) ?? "Action complete."
             self.statusMessage = firstLine
         } catch {
@@ -480,5 +493,285 @@ final class WorkbenchViewModel: ObservableObject {
             self.selectedAttributesError = error.localizedDescription
             self.isLoadingSelectedAttributes = false
         }
+    }
+
+    private func recordBundleIdentifierRecency(from actionProgram: String) {
+        let bundleIdentifiers = Self.extractOpenCloseBundleIdentifiers(from: actionProgram)
+        guard !bundleIdentifiers.isEmpty else {
+            return
+        }
+
+        Task {
+            let identifiers = await OXAAppBundleIndex.shared.markRecent(bundleIdentifiers: bundleIdentifiers)
+            self.actionBundleIdentifiers = identifiers
+        }
+    }
+
+    private static func extractOpenCloseBundleIdentifiers(from source: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?:^|;)\\s*(?:open|close)\\s+\"((?:\\\\.|[^\"\\\\])*)\"",
+            options: [.caseInsensitive]) else
+        {
+            return []
+        }
+
+        let nsSource = source as NSString
+        let fullRange = NSRange(location: 0, length: nsSource.length)
+        let matches = regex.matches(in: source, options: [], range: fullRange)
+        var bundleIdentifiers: [String] = []
+        bundleIdentifiers.reserveCapacity(matches.count)
+
+        for match in matches {
+            guard match.numberOfRanges > 1 else {
+                continue
+            }
+            let captured = nsSource.substring(with: match.range(at: 1))
+            let unescaped = captured
+                .replacingOccurrences(of: "\\\"", with: "\"")
+                .replacingOccurrences(of: "\\\\", with: "\\")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard Self.looksLikeBundleIdentifier(unescaped) else {
+                continue
+            }
+            bundleIdentifiers.append(unescaped)
+        }
+        return bundleIdentifiers
+    }
+
+    private static func looksLikeBundleIdentifier(_ value: String) -> Bool {
+        guard value.contains("."), !value.contains(where: { $0.isWhitespace }) else {
+            return false
+        }
+        return true
+    }
+}
+
+private actor OXAAppBundleIndex {
+    static let shared = OXAAppBundleIndex()
+
+    private static let recencyDefaultsKey = "OXAAppBundleIdentifierRecency"
+    private static let defaultSearchRoots: [String] = [
+        "/Applications",
+        "/Applications/Utilities",
+        "/System/Applications",
+        "/System/Applications/Utilities",
+        "/System/Library/CoreServices",
+        (NSHomeDirectory() as NSString).appendingPathComponent("Applications"),
+    ]
+
+    private var knownBundleIdentifiers: Set<String> = []
+    private var runningBundleIdentifiers: Set<String> = []
+    private var recencyByBundleIdentifier: [String: TimeInterval]
+    private var didPreload = false
+
+    private init() {
+        self.recencyByBundleIdentifier = Self.loadRecencyMap()
+    }
+
+    func preload() async -> [String] {
+        if !self.didPreload {
+            let scanned = await Task.detached(priority: .utility) {
+                Self.scanInstalledBundleIdentifiers()
+            }.value
+            self.knownBundleIdentifiers.formUnion(scanned)
+            self.didPreload = true
+        }
+
+        let running = await self.fetchRunningBundleIdentifiers()
+        self.runningBundleIdentifiers = running
+        self.knownBundleIdentifiers.formUnion(running)
+        return self.sortedBundleIdentifiers()
+    }
+
+    func absorbRunning(bundleIdentifiers: [String]) -> [String] {
+        let normalized = Self.normalizeBundleIdentifiers(bundleIdentifiers)
+        self.runningBundleIdentifiers.formUnion(normalized)
+        self.knownBundleIdentifiers.formUnion(normalized)
+        return self.sortedBundleIdentifiers()
+    }
+
+    func markRecent(bundleIdentifiers: [String]) async -> [String] {
+        var normalized = Self.normalizeBundleIdentifiers(bundleIdentifiers)
+        guard !normalized.isEmpty else {
+            return self.sortedBundleIdentifiers()
+        }
+
+        var allowed: Set<String> = []
+        allowed.reserveCapacity(normalized.count)
+        for identifier in normalized {
+            if self.knownBundleIdentifiers.contains(identifier) {
+                allowed.insert(identifier)
+                continue
+            }
+            if await Self.isRegularAppBundleIdentifier(identifier) {
+                self.knownBundleIdentifiers.insert(identifier)
+                allowed.insert(identifier)
+            }
+        }
+        normalized = allowed
+        guard !normalized.isEmpty else {
+            return self.sortedBundleIdentifiers()
+        }
+
+        let now = Date().timeIntervalSince1970
+        for identifier in normalized {
+            self.recencyByBundleIdentifier[identifier] = now
+        }
+        Self.persistRecencyMap(self.recencyByBundleIdentifier)
+
+        return self.sortedBundleIdentifiers()
+    }
+
+    private func sortedBundleIdentifiers() -> [String] {
+        self.knownBundleIdentifiers.sorted { lhs, rhs in
+            let lhsRecency = self.recencyByBundleIdentifier[lhs] ?? 0
+            let rhsRecency = self.recencyByBundleIdentifier[rhs] ?? 0
+            if lhsRecency != rhsRecency {
+                return lhsRecency > rhsRecency
+            }
+
+            let lhsRunning = self.runningBundleIdentifiers.contains(lhs)
+            let rhsRunning = self.runningBundleIdentifiers.contains(rhs)
+            if lhsRunning != rhsRunning {
+                return lhsRunning && !rhsRunning
+            }
+
+            return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+        }
+    }
+
+    private func fetchRunningBundleIdentifiers() async -> Set<String> {
+        await MainActor.run {
+            Set(NSWorkspace.shared.runningApplications.compactMap { app in
+                guard app.activationPolicy == .regular else {
+                    return nil
+                }
+                return Self.normalizeBundleIdentifier(app.bundleIdentifier)
+            })
+        }
+    }
+
+    private static func scanInstalledBundleIdentifiers() -> Set<String> {
+        let manager = FileManager.default
+        var identifiers = Set<String>()
+
+        for rootPath in Self.defaultSearchRoots {
+            var isDirectory: ObjCBool = false
+            guard manager.fileExists(atPath: rootPath, isDirectory: &isDirectory), isDirectory.boolValue else {
+                continue
+            }
+
+            let rootURL = URL(fileURLWithPath: rootPath, isDirectory: true)
+            let keys: [URLResourceKey] = [.isDirectoryKey, .isPackageKey]
+            guard let enumerator = manager.enumerator(
+                at: rootURL,
+                includingPropertiesForKeys: keys,
+                options: [.skipsHiddenFiles, .skipsPackageDescendants])
+            else {
+                continue
+            }
+
+            for case let appURL as URL in enumerator {
+                guard appURL.pathExtension.caseInsensitiveCompare("app") == .orderedSame else {
+                    continue
+                }
+                if let bundleIdentifier = Self.regularBundleIdentifier(forAppURL: appURL) {
+                    identifiers.insert(bundleIdentifier)
+                }
+            }
+        }
+
+        return identifiers
+    }
+
+    private static func regularBundleIdentifier(forAppURL appURL: URL) -> String? {
+        let infoURL = appURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Info.plist", isDirectory: false)
+        guard
+            let data = try? Data(contentsOf: infoURL),
+            let plist = try? PropertyListSerialization.propertyList(
+                from: data,
+                options: [],
+                format: nil) as? [String: Any],
+            let raw = plist["CFBundleIdentifier"] as? String,
+            Self.isRegularApplicationPlist(plist)
+        else {
+            return nil
+        }
+        return Self.normalizeBundleIdentifier(raw)
+    }
+
+    private static func isRegularApplicationPlist(_ plist: [String: Any]) -> Bool {
+        let backgroundOnly = Self.plistBool(plist["LSBackgroundOnly"])
+        let uiElement = Self.plistBool(plist["LSUIElement"])
+        return !backgroundOnly && !uiElement
+    }
+
+    private static func plistBool(_ value: Any?) -> Bool {
+        if let boolValue = value as? Bool {
+            return boolValue
+        }
+        if let numberValue = value as? NSNumber {
+            return numberValue.boolValue
+        }
+        if let stringValue = value as? String {
+            switch stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "1", "true", "yes":
+                return true
+            default:
+                return false
+            }
+        }
+        return false
+    }
+
+    private static func isRegularAppBundleIdentifier(_ bundleIdentifier: String) async -> Bool {
+        let appURL: URL? = await MainActor.run {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier)
+        }
+        guard let appURL else {
+            return false
+        }
+        return Self.regularBundleIdentifier(forAppURL: appURL) != nil
+    }
+
+    private static func normalizeBundleIdentifiers<S: Sequence>(_ bundleIdentifiers: S) -> Set<String> where S.Element == String {
+        Set(bundleIdentifiers.compactMap { Self.normalizeBundleIdentifier($0) })
+    }
+
+    private static func normalizeBundleIdentifier(_ bundleIdentifier: String?) -> String? {
+        guard let bundleIdentifier else {
+            return nil
+        }
+        let trimmed = bundleIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed.lowercased()
+    }
+
+    private static func loadRecencyMap() -> [String: TimeInterval] {
+        guard let stored = UserDefaults.standard.dictionary(forKey: Self.recencyDefaultsKey) else {
+            return [:]
+        }
+
+        var recency: [String: TimeInterval] = [:]
+        recency.reserveCapacity(stored.count)
+        for (key, value) in stored {
+            guard let normalizedKey = Self.normalizeBundleIdentifier(key) else {
+                continue
+            }
+            if let timestamp = value as? TimeInterval {
+                recency[normalizedKey] = timestamp
+            } else if let number = value as? NSNumber {
+                recency[normalizedKey] = number.doubleValue
+            }
+        }
+        return recency
+    }
+
+    private static func persistRecencyMap(_ recencyByBundleIdentifier: [String: TimeInterval]) {
+        UserDefaults.standard.set(recencyByBundleIdentifier, forKey: Self.recencyDefaultsKey)
     }
 }

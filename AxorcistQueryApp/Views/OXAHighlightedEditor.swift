@@ -1,10 +1,12 @@
 import AppKit
+import AXorcist
 import SwiftUI
 
 struct OXAHighlightedEditor: NSViewRepresentable {
     @Binding var text: String
 
     var referenceRows: [QueryResultRow] = []
+    var appBundleIdentifiers: [String] = []
     var fontSize: CGFloat = 16
     var focusRequestID: UInt64 = 0
     var onRunAction: (() -> Void)?
@@ -264,7 +266,8 @@ struct OXAHighlightedEditor: NSViewRepresentable {
                 for: query,
                 force: force,
                 limit: OXAAutocompleteEngine.maxVisibleSuggestions,
-                referenceRows: self.parent.referenceRows)
+                referenceRows: self.parent.referenceRows,
+                appBundleIdentifiers: self.parent.appBundleIdentifiers)
             guard !suggestions.isEmpty else {
                 self.dismissSuggestionPopover()
                 return
@@ -312,7 +315,9 @@ struct OXAHighlightedEditor: NSViewRepresentable {
             }
 
             var replacementText = self.currentSuggestions[index].insertionText
-            if query.replacementRange.length == 0,
+            if query.shouldPadWithLeadingSpace,
+               query.replacementRange.length == 0,
+               replacementText != "+",
                query.replacementRange.location > 0,
                let previousCharacter = self.character(beforeUTF16Offset: query.replacementRange.location, in: textView.string),
                !previousCharacter.isWhitespace,
@@ -755,6 +760,20 @@ private struct OXAAutocompleteQuery {
     let replacementRange: NSRange
     let keywordCandidates: [String]
     let expectsReference: Bool
+    let referenceIntent: OXAReferenceIntent
+    let expectsAppIdentifier: Bool
+    let shouldPadWithLeadingSpace: Bool
+}
+
+private enum OXAReferenceIntent {
+    case none
+    case readSource
+    case textTarget
+    case clickTarget
+    case dragSource
+    case dragTarget
+    case hotkeyTarget
+    case scrollTarget
 }
 
 private struct OXAAutocompleteSuggestion {
@@ -831,6 +850,15 @@ private struct OXAReferenceSearchCandidate {
     let payload: OXAReferenceAutocompletePayload
     let ranking: (Int, Int, Int)
     let rowOrder: Int
+    let fitScore: Int
+}
+
+private struct OXAHotkeyTokenState {
+    var usedModifiers: [String] = []
+    var hasBaseKey = false
+    var hasAnyToken = false
+    var trailingPlus = false
+    var hasToTarget = false
 }
 
 private struct OXAAutocompleteToken {
@@ -848,6 +876,16 @@ private struct OXAAutocompleteToken {
 private struct OXAAutocompleteScanResult {
     let tokens: [OXAAutocompleteToken]
     let inStringLiteral: Bool
+    let stringContext: OXAAutocompleteStringContext?
+}
+
+private struct OXAAutocompleteStringContext {
+    enum Kind {
+        case openOrCloseAppIdentifier
+    }
+
+    let kind: Kind
+    let contentStartUTF16: Int
 }
 
 @MainActor
@@ -857,9 +895,10 @@ private struct OXAAutocompleteEngine {
     private static let statementKeywords = ["send", "read", "sleep", "open", "close"]
     private static let sendActions = ["text", "click", "right click", "drag", "hotkey", "scroll"]
     private static let scrollDirections = ["up", "down", "left", "right"]
-    private static let hotkeyParts = [
-        "cmd", "ctrl", "alt", "shift", "fn",
-        "enter", "tab", "space", "escape",
+    private static let hotkeyModifiers = ["cmd", "ctrl", "alt", "shift", "fn"]
+    private static let hotkeyNamedBaseKeys = [
+        "enter", "tab", "space", "escape", "backspace", "delete",
+        "home", "end", "page_up", "page_down",
         "up", "down", "left", "right",
     ]
 
@@ -873,15 +912,38 @@ private struct OXAAutocompleteEngine {
             in: text,
             cursorUTF16: clampedCursor,
             partialWordRange: partialWordRange)
-        let prefix = (text as NSString).substring(with: replacementRange)
         let prefixStartIndex = String.Index(utf16Offset: replacementRange.location, in: text)
         let scanResult = self.scanContext(in: text, upTo: prefixStartIndex)
+        if scanResult.inStringLiteral,
+           let stringContext = scanResult.stringContext,
+           case .openOrCloseAppIdentifier = stringContext.kind
+        {
+            let contentStart = max(0, min(stringContext.contentStartUTF16, clampedCursor))
+            let stringReplacementRange = NSRange(
+                location: contentStart,
+                length: max(0, clampedCursor - contentStart))
+            guard NSMaxRange(stringReplacementRange) <= text.utf16.count else {
+                return nil
+            }
+            let stringPrefix = (text as NSString).substring(with: stringReplacementRange)
+            return OXAAutocompleteQuery(
+                prefix: stringPrefix,
+                replacementRange: stringReplacementRange,
+                keywordCandidates: [],
+                expectsReference: false,
+                referenceIntent: .none,
+                expectsAppIdentifier: true,
+                shouldPadWithLeadingSpace: false)
+        }
+
         if scanResult.inStringLiteral {
             return nil
         }
 
-        let keywordCandidates = self.candidates(for: scanResult.tokens)
+        let prefix = (text as NSString).substring(with: replacementRange)
+        let keywordCandidates = self.candidates(for: scanResult.tokens, queryPrefix: prefix)
         let expectsReference = self.isReferenceContext(for: scanResult.tokens)
+        let referenceIntent = self.referenceIntent(for: scanResult.tokens)
         guard expectsReference || !keywordCandidates.isEmpty else {
             return nil
         }
@@ -890,20 +952,24 @@ private struct OXAAutocompleteEngine {
             prefix: prefix,
             replacementRange: replacementRange,
             keywordCandidates: keywordCandidates,
-            expectsReference: expectsReference)
+            expectsReference: expectsReference,
+            referenceIntent: referenceIntent,
+            expectsAppIdentifier: false,
+            shouldPadWithLeadingSpace: true)
     }
 
     func suggestions(
         for query: OXAAutocompleteQuery,
         force: Bool,
         limit: Int,
-        referenceRows: [QueryResultRow]) -> [OXAAutocompleteSuggestion]
+        referenceRows: [QueryResultRow],
+        appBundleIdentifiers: [String]) -> [OXAAutocompleteSuggestion]
     {
-        let prefix = query.prefix.lowercased()
         if query.expectsReference {
             let referenceSuggestions = self.referenceSuggestions(
-                queryPrefix: prefix,
+                queryPrefix: query.prefix,
                 referenceRows: referenceRows,
+                intent: query.referenceIntent,
                 limit: limit)
             if !referenceSuggestions.isEmpty {
                 return referenceSuggestions
@@ -914,6 +980,20 @@ private struct OXAAutocompleteEngine {
             }
         }
 
+        if query.expectsAppIdentifier {
+            let appSuggestions = self.appIdentifierSuggestions(
+                queryPrefix: query.prefix,
+                appBundleIdentifiers: appBundleIdentifiers,
+                limit: limit)
+            if !appSuggestions.isEmpty {
+                return appSuggestions.map { suggestion in
+                    OXAAutocompleteSuggestion(insertionText: suggestion, kind: .keyword)
+                }
+            }
+            return []
+        }
+
+        let prefix = query.prefix.lowercased()
         let filtered: [String]
         if prefix.isEmpty {
             filtered = query.keywordCandidates
@@ -935,7 +1015,7 @@ private struct OXAAutocompleteEngine {
         return deduped
     }
 
-    private func candidates(for tokens: [OXAAutocompleteToken]) -> [String] {
+    private func candidates(for tokens: [OXAAutocompleteToken], queryPrefix: String) -> [String] {
         let statementTokens = self.statementTokens(from: tokens)
         let components = statementTokens.compactMap { token -> OXAAutocompleteComponent? in
             switch token.kind {
@@ -958,7 +1038,8 @@ private struct OXAAutocompleteEngine {
             case "send":
                 return self.sendCandidates(
                     for: Array(components.dropFirst()),
-                    statementTokens: statementTokens)
+                    statementTokens: statementTokens,
+                    queryPrefix: queryPrefix)
             case "read":
                 return self.readCandidates(for: Array(components.dropFirst()))
             case "sleep", "open", "close":
@@ -986,7 +1067,8 @@ private struct OXAAutocompleteEngine {
 
     private func sendCandidates(
         for components: [OXAAutocompleteComponent],
-        statementTokens: [OXAAutocompleteToken]) -> [String]
+        statementTokens: [OXAAutocompleteToken],
+        queryPrefix: String) -> [String]
     {
         guard let first = components.first else {
             return Self.sendActions
@@ -1008,7 +1090,8 @@ private struct OXAAutocompleteEngine {
         case "hotkey":
             return self.sendHotkeyCandidates(
                 for: components,
-                statementTokens: statementTokens)
+                statementTokens: statementTokens,
+                queryPrefix: queryPrefix)
         case "scroll":
             return self.sendScrollCandidates(for: components)
         default:
@@ -1103,22 +1186,31 @@ private struct OXAAutocompleteEngine {
 
     private func sendHotkeyCandidates(
         for components: [OXAAutocompleteComponent],
-        statementTokens: [OXAAutocompleteToken]) -> [String]
+        statementTokens: [OXAAutocompleteToken],
+        queryPrefix: String) -> [String]
     {
-        if components.count <= 1 {
-            return Self.hotkeyParts
+        guard components.count >= 1 else {
+            return []
         }
 
-        if case .plus = statementTokens.last?.kind {
-            return Self.hotkeyParts
+        let hotkeyTokens = self.hotkeyTokens(from: statementTokens, queryPrefix: queryPrefix)
+        guard !hotkeyTokens.hasToTarget else {
+            return []
         }
 
-        for component in components.dropFirst() {
-            if case .word("to") = component {
-                return []
-            }
+        if hotkeyTokens.hasBaseKey {
+            return hotkeyTokens.trailingPlus ? [] : ["to"]
         }
-        return ["to"] + Self.hotkeyParts
+
+        if hotkeyTokens.trailingPlus {
+            return self.availableHotkeyParts(usedModifiers: hotkeyTokens.usedModifiers)
+        }
+
+        if hotkeyTokens.hasAnyToken {
+            return ["+"]
+        }
+
+        return self.availableHotkeyParts(usedModifiers: [])
     }
 
     private func sendScrollCandidates(for components: [OXAAutocompleteComponent]) -> [String] {
@@ -1146,7 +1238,157 @@ private struct OXAAutocompleteEngine {
         return ["to"] + Self.scrollDirections
     }
 
+    private func availableHotkeyParts(usedModifiers: [String]) -> [String] {
+        let usedModifierSet = Set(usedModifiers.map { $0.lowercased() })
+        let remainingModifiers = Self.hotkeyModifiers.filter { !usedModifierSet.contains($0) }
+        return remainingModifiers + self.hotkeyBaseKeys()
+    }
+
+    private func hotkeyBaseKeys() -> [String] {
+        var keys: [String] = Self.hotkeyNamedBaseKeys
+        keys.reserveCapacity(Self.hotkeyNamedBaseKeys.count + 26 + 10 + 24)
+
+        for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
+            if let unicode = UnicodeScalar(scalar) {
+                keys.append(String(unicode))
+            }
+        }
+        for digit in 0...9 {
+            keys.append(String(digit))
+        }
+        for number in 1...24 {
+            keys.append("f\(number)")
+        }
+        return keys
+    }
+
+    private func hotkeyTokens(
+        from statementTokens: [OXAAutocompleteToken],
+        queryPrefix: String) -> OXAHotkeyTokenState
+    {
+        var analyzedTokens = statementTokens
+        let normalizedPrefix = self.normalizeHotkeyToken(queryPrefix)
+        if !normalizedPrefix.isEmpty,
+           case let .word(rawLastWord) = analyzedTokens.last?.kind
+        {
+            let normalizedLastWord = self.normalizeHotkeyToken(rawLastWord)
+            if normalizedLastWord == normalizedPrefix,
+               !self.isRecognizedHotkeyToken(normalizedLastWord)
+            {
+                analyzedTokens.removeLast()
+            }
+        }
+
+        let statementWords = analyzedTokens.compactMap { token -> String? in
+            guard case let .word(value) = token.kind else {
+                return nil
+            }
+            return value.lowercased()
+        }
+
+        guard statementWords.count >= 2,
+              statementWords[0] == "send",
+              statementWords[1] == "hotkey"
+        else {
+            return OXAHotkeyTokenState()
+        }
+
+        var usedModifiers: [String] = []
+        var hasBaseKey = false
+        var hasAnyToken = false
+        var trailingPlus = false
+        var hasToTarget = false
+
+        var seenHotkeyKeyword = false
+        for token in analyzedTokens {
+            switch token.kind {
+            case let .word(rawValue):
+                let value = self.normalizeHotkeyToken(rawValue)
+                if !seenHotkeyKeyword {
+                    if value == "hotkey" {
+                        seenHotkeyKeyword = true
+                    }
+                    trailingPlus = false
+                    continue
+                }
+
+                if value == "to" {
+                    hasToTarget = true
+                    trailingPlus = false
+                    continue
+                }
+                if hasToTarget {
+                    trailingPlus = false
+                    continue
+                }
+
+                hasAnyToken = true
+                if Self.hotkeyModifiers.contains(value) {
+                    usedModifiers.append(value)
+                } else {
+                    hasBaseKey = true
+                }
+                trailingPlus = false
+
+            case .plus:
+                if seenHotkeyKeyword, !hasToTarget {
+                    trailingPlus = true
+                }
+
+            default:
+                trailingPlus = false
+            }
+        }
+
+        return OXAHotkeyTokenState(
+            usedModifiers: Array(Set(usedModifiers)).sorted(),
+            hasBaseKey: hasBaseKey,
+            hasAnyToken: hasAnyToken,
+            trailingPlus: trailingPlus,
+            hasToTarget: hasToTarget)
+    }
+
+    private func normalizeHotkeyToken(_ token: String) -> String {
+        let lowered = token
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+
+        let aliases: [String: String] = [
+            "command": "cmd",
+            "control": "ctrl",
+            "option": "alt",
+            "opt": "alt",
+            "return": "enter",
+            "esc": "escape",
+            "pageup": "page_up",
+            "pagedown": "page_down",
+            "arrowup": "up",
+            "arrowdown": "down",
+            "arrowleft": "left",
+            "arrowright": "right",
+        ]
+        return aliases[lowered] ?? lowered
+    }
+
+    private func isRecognizedHotkeyToken(_ token: String) -> Bool {
+        if Self.hotkeyModifiers.contains(token) {
+            return true
+        }
+        if self.hotkeyBaseKeys().contains(token) {
+            return true
+        }
+        if token == "send" || token == "hotkey" || token == "to" {
+            return true
+        }
+        return false
+    }
+
     private func isReferenceContext(for tokens: [OXAAutocompleteToken]) -> Bool {
+        self.referenceIntent(for: tokens) != .none
+    }
+
+    private func referenceIntent(for tokens: [OXAAutocompleteToken]) -> OXAReferenceIntent {
         let statementTokens = self.statementTokens(from: tokens)
         let components = statementTokens.compactMap { token -> OXAAutocompleteComponent? in
             switch token.kind {
@@ -1160,16 +1402,16 @@ private struct OXAAutocompleteEngine {
         }
 
         guard let firstWord = self.word(at: 0, in: components) else {
-            return false
+            return .none
         }
 
         switch firstWord {
         case "read":
-            return self.isReadReferenceContext(components)
+            return self.isReadReferenceContext(components) ? .readSource : .none
         case "send":
-            return self.isSendReferenceContext(components)
+            return self.sendReferenceIntent(components)
         default:
-            return false
+            return .none
         }
     }
 
@@ -1178,10 +1420,10 @@ private struct OXAAutocompleteEngine {
         return self.word(at: 2, in: components) == "from"
     }
 
-    private func isSendReferenceContext(_ components: [OXAAutocompleteComponent]) -> Bool {
+    private func sendReferenceIntent(_ components: [OXAAutocompleteComponent]) -> OXAReferenceIntent {
         let sendComponents = Array(components.dropFirst())
         guard let action = self.word(at: 0, in: sendComponents) else {
-            return false
+            return .none
         }
 
         switch action {
@@ -1194,45 +1436,46 @@ private struct OXAAutocompleteEngine {
                 && self.word(at: 2, in: sendComponents) == "as"
                 && self.word(at: 3, in: sendComponents) == "keys"
                 && self.word(at: 4, in: sendComponents) == "to"
-            return isDirectTextTarget || isKeysTextTarget
+            return (isDirectTextTarget || isKeysTextTarget) ? .textTarget : .none
 
         case "click":
-            return sendComponents.count >= 2 && self.word(at: 1, in: sendComponents) == "to"
+            return (sendComponents.count >= 2 && self.word(at: 1, in: sendComponents) == "to") ? .clickTarget : .none
 
         case "right":
-            return sendComponents.count >= 3
+            return (sendComponents.count >= 3
                 && self.word(at: 1, in: sendComponents) == "click"
-                && self.word(at: 2, in: sendComponents) == "to"
+                && self.word(at: 2, in: sendComponents) == "to") ? .clickTarget : .none
 
         case "drag":
             if sendComponents.count == 1 {
-                return true
+                return .dragSource
             }
-            return sendComponents.count >= 3 && self.word(at: 2, in: sendComponents) == "to"
+            return (sendComponents.count >= 3 && self.word(at: 2, in: sendComponents) == "to") ? .dragTarget : .none
 
         case "hotkey":
             guard let toIndex = sendComponents.lastIndex(where: { component in
                 if case .word("to") = component { return true }
                 return false
             }) else {
-                return false
+                return .none
             }
-            return toIndex == sendComponents.count - 1
+            return toIndex == sendComponents.count - 1 ? .hotkeyTarget : .none
 
         case "scroll":
             if sendComponents.count >= 2 && self.word(at: 1, in: sendComponents) == "to" {
-                return true
+                return .scrollTarget
             }
-            return sendComponents.count >= 3 && self.word(at: 2, in: sendComponents) == "to"
+            return (sendComponents.count >= 3 && self.word(at: 2, in: sendComponents) == "to") ? .scrollTarget : .none
 
         default:
-            return false
+            return .none
         }
     }
 
     private func referenceSuggestions(
         queryPrefix: String,
         referenceRows: [QueryResultRow],
+        intent: OXAReferenceIntent,
         limit: Int) -> [OXAAutocompleteSuggestion]
     {
         let trimmedPrefix = queryPrefix.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1254,7 +1497,14 @@ private struct OXAAutocompleteEngine {
 
         if trimmedPrefix.isEmpty {
             return rowsWithReferences
-                .sorted { lhs, rhs in lhs.row.index < rhs.row.index }
+                .sorted { lhs, rhs in
+                    let lhsFit = self.referenceFitScore(for: lhs.role, intent: intent)
+                    let rhsFit = self.referenceFitScore(for: rhs.role, intent: intent)
+                    if lhsFit != rhsFit {
+                        return lhsFit > rhsFit
+                    }
+                    return lhs.row.index < rhs.row.index
+                }
                 .prefix(limit)
                 .map { candidate in
                     let payload = OXAReferenceAutocompletePayload(
@@ -1298,10 +1548,14 @@ private struct OXAAutocompleteEngine {
                 insertionText: candidate.reference,
                 payload: payload,
                 ranking: bestMatch.ranking,
-                rowOrder: candidate.row.index))
+                rowOrder: candidate.row.index,
+                fitScore: self.referenceFitScore(for: candidate.role, intent: intent)))
         }
 
         ranked.sort { lhs, rhs in
+            if lhs.fitScore != rhs.fitScore {
+                return lhs.fitScore > rhs.fitScore
+            }
             if lhs.ranking != rhs.ranking {
                 return lhs.ranking < rhs.ranking
             }
@@ -1367,6 +1621,99 @@ private struct OXAAutocompleteEngine {
             matchRange: NSRange(location: startIndex, length: max(1, endIndex - startIndex + 1)))
     }
 
+    private func referenceFitScore(for role: String, intent: OXAReferenceIntent) -> Int {
+        let normalizedRole = role.lowercased()
+        switch intent {
+        case .none, .readSource:
+            return 0
+        case .textTarget:
+            if normalizedRole == AXRoleNames.kAXTextFieldRole.lowercased() { return 500 }
+            if normalizedRole == AXRoleNames.kAXTextAreaRole.lowercased() { return 480 }
+            if normalizedRole == AXRoleNames.kAXSearchFieldRole.lowercased() { return 460 }
+            if normalizedRole == AXRoleNames.kAXComboBoxRole.lowercased() { return 420 }
+            if normalizedRole == AXRoleNames.kAXWebAreaRole.lowercased() { return 250 }
+            return 40
+
+        case .clickTarget:
+            if normalizedRole == AXRoleNames.kAXButtonRole.lowercased() { return 460 }
+            if normalizedRole == AXRoleNames.kAXLinkRole.lowercased() { return 440 }
+            if normalizedRole == AXRoleNames.kAXMenuItemRole.lowercased() { return 420 }
+            if normalizedRole == AXRoleNames.kAXCheckBoxRole.lowercased() { return 400 }
+            if normalizedRole == AXRoleNames.kAXRadioButtonRole.lowercased() { return 390 }
+            if normalizedRole == AXRoleNames.kAXPopUpButtonRole.lowercased() { return 360 }
+            return 60
+
+        case .dragSource:
+            if normalizedRole == AXRoleNames.kAXScrollBarRole.lowercased() { return 360 }
+            if normalizedRole == AXRoleNames.kAXSliderRole.lowercased() { return 340 }
+            if normalizedRole == AXRoleNames.kAXColumnRole.lowercased() || normalizedRole == AXRoleNames.kAXRowRole.lowercased() {
+                return 300
+            }
+            return 100
+
+        case .dragTarget:
+            if normalizedRole == AXRoleNames.kAXScrollAreaRole.lowercased() { return 420 }
+            if normalizedRole == AXRoleNames.kAXGroupRole.lowercased() { return 380 }
+            if normalizedRole == AXRoleNames.kAXWindowRole.lowercased() { return 360 }
+            if normalizedRole == AXRoleNames.kAXWebAreaRole.lowercased() { return 340 }
+            return 120
+
+        case .hotkeyTarget:
+            if normalizedRole == AXRoleNames.kAXTextFieldRole.lowercased() { return 380 }
+            if normalizedRole == AXRoleNames.kAXTextAreaRole.lowercased() { return 360 }
+            if normalizedRole == AXRoleNames.kAXSearchFieldRole.lowercased() { return 340 }
+            return 140
+
+        case .scrollTarget:
+            if normalizedRole == AXRoleNames.kAXScrollAreaRole.lowercased() { return 500 }
+            if normalizedRole == AXRoleNames.kAXWebAreaRole.lowercased() { return 470 }
+            if normalizedRole == AXRoleNames.kAXListRole.lowercased() { return 430 }
+            if normalizedRole == AXRoleNames.kAXTableRole.lowercased() { return 410 }
+            if normalizedRole == AXRoleNames.kAXOutlineRole.lowercased() { return 390 }
+            return 80
+        }
+    }
+
+    private func appIdentifierSuggestions(
+        queryPrefix: String,
+        appBundleIdentifiers: [String],
+        limit: Int) -> [String]
+    {
+        let trimmedPrefix = queryPrefix.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !appBundleIdentifiers.isEmpty else {
+            return []
+        }
+
+        var seen = Set<String>()
+        var startsWithMatches: [String] = []
+        var containsMatches: [String] = []
+
+        for identifier in appBundleIdentifiers {
+            let trimmed = identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                continue
+            }
+
+            let normalized = trimmed.lowercased()
+            guard seen.insert(normalized).inserted else {
+                continue
+            }
+
+            if trimmedPrefix.isEmpty {
+                startsWithMatches.append(trimmed)
+                continue
+            }
+
+            if normalized.hasPrefix(trimmedPrefix) {
+                startsWithMatches.append(trimmed)
+            } else if normalized.contains(trimmedPrefix) {
+                containsMatches.append(trimmed)
+            }
+        }
+
+        return Array((startsWithMatches + containsMatches).prefix(limit))
+    }
+
     private func word(at index: Int, in components: [OXAAutocompleteComponent]) -> String? {
         guard index >= 0, index < components.count else {
             return nil
@@ -1414,7 +1761,29 @@ private struct OXAAutocompleteEngine {
             }
 
             if character == "\"" {
+                let statementTokensBeforeString = self.statementTokens(from: tokens)
+                let statementComponents = statementTokensBeforeString.compactMap { token -> OXAAutocompleteComponent? in
+                    switch token.kind {
+                    case let .word(value):
+                        return .word(value.lowercased())
+                    case .string:
+                        return .string
+                    default:
+                        return nil
+                    }
+                }
+
+                let stringContextKind: OXAAutocompleteStringContext.Kind?
+                if self.isOpenCloseStringContext(statementComponents) {
+                    stringContextKind = .openOrCloseAppIdentifier
+                } else {
+                    stringContextKind = nil
+                }
+
                 index = text.index(after: index)
+                let contentStartUTF16 = text.utf16.distance(
+                    from: text.utf16.startIndex,
+                    to: index.samePosition(in: text.utf16) ?? text.utf16.endIndex)
                 var escaped = false
                 var closed = false
                 while index < cursor {
@@ -1434,7 +1803,13 @@ private struct OXAAutocompleteEngine {
                     }
                 }
                 if !closed {
-                    return OXAAutocompleteScanResult(tokens: tokens, inStringLiteral: true)
+                    let stringContext = stringContextKind.map {
+                        OXAAutocompleteStringContext(kind: $0, contentStartUTF16: contentStartUTF16)
+                    }
+                    return OXAAutocompleteScanResult(
+                        tokens: tokens,
+                        inStringLiteral: true,
+                        stringContext: stringContext)
                 }
                 tokens.append(OXAAutocompleteToken(kind: .string))
                 continue
@@ -1452,7 +1827,17 @@ private struct OXAAutocompleteEngine {
             index = text.index(after: index)
         }
 
-        return OXAAutocompleteScanResult(tokens: tokens, inStringLiteral: false)
+        return OXAAutocompleteScanResult(tokens: tokens, inStringLiteral: false, stringContext: nil)
+    }
+
+    private func isOpenCloseStringContext(_ components: [OXAAutocompleteComponent]) -> Bool {
+        guard let first = self.word(at: 0, in: components) else {
+            return false
+        }
+        guard first == "open" || first == "close" else {
+            return false
+        }
+        return components.count == 1
     }
 
     private func resolvePrefixRange(in text: String, cursorUTF16: Int, partialWordRange: NSRange?) -> NSRange {
