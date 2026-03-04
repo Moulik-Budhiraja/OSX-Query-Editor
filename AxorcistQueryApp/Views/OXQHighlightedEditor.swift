@@ -496,31 +496,46 @@ private struct OXQSuggestionPopoverView: View {
             Divider()
                 .opacity(0.6)
 
-            ScrollView(.vertical, showsIndicators: suggestions.count > 8) {
-                LazyVStack(spacing: 2) {
-                    ForEach(Array(suggestions.enumerated()), id: \.offset) { index, suggestion in
-                        HStack(spacing: 8) {
-                            Text(suggestion)
-                                .font(.system(size: max(12, fontSize - 1), weight: .regular, design: .monospaced))
-                                .lineLimit(1)
-                                .foregroundStyle(index == selectedIndex ? Color.white : Color.primary)
-                            Spacer(minLength: 8)
-                            Text(tagLabel)
-                                .font(.system(size: 9, weight: .bold, design: .rounded))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .foregroundStyle(index == selectedIndex ? Color.white.opacity(0.92) : Color.secondary)
-                                .background(index == selectedIndex ? Color.white.opacity(0.2) : Color.secondary.opacity(0.14))
-                                .clipShape(Capsule(style: .continuous))
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: suggestions.count > 8) {
+                    LazyVStack(spacing: 2) {
+                        ForEach(Array(suggestions.enumerated()), id: \.offset) { index, suggestion in
+                            HStack(spacing: 8) {
+                                Text(suggestion)
+                                    .font(.system(size: max(12, fontSize - 1), weight: .regular, design: .monospaced))
+                                    .lineLimit(1)
+                                    .foregroundStyle(index == selectedIndex ? Color.white : Color.primary)
+                                Spacer(minLength: 8)
+                                Text(tagLabel)
+                                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .foregroundStyle(index == selectedIndex ? Color.white.opacity(0.92) : Color.secondary)
+                                    .background(index == selectedIndex ? Color.white.opacity(0.2) : Color.secondary.opacity(0.14))
+                                    .clipShape(Capsule(style: .continuous))
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(index == selectedIndex ? Color.accentColor.opacity(0.92) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .contentShape(Rectangle())
+                            .id(index)
+                            .onTapGesture {
+                                onSelect(index)
+                            }
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(index == selectedIndex ? Color.accentColor.opacity(0.92) : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            onSelect(index)
+                    }
+                    .onChange(of: selectedIndex) { _, newValue in
+                        guard suggestions.indices.contains(newValue) else { return }
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            proxy.scrollTo(newValue)
+                        }
+                    }
+                    .onChange(of: suggestions.count) { _, _ in
+                        guard suggestions.indices.contains(selectedIndex) else { return }
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            proxy.scrollTo(selectedIndex)
                         }
                     }
                 }
