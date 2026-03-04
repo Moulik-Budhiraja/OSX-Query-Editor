@@ -1,17 +1,44 @@
 import AppKit
 import AXorcist
+import ApplicationServices
 import Foundation
 
 @MainActor
 final class SelectorQueryService {
+    private struct SelectorPrefetchSnapshot {
+        let root: Element
+        let appPID: pid_t?
+        let maxDepth: Int
+        let childrenByElement: [Element: [Element]]
+        let parentByElement: [Element: Element]
+        let roleByElement: [Element: String]
+        let attributeValuesByElement: [Element: [String: String]]
+        let prefetchedAttributeNames: Set<String>
+    }
+
+    private struct QueryExecutionContext {
+        let root: Element
+        let snapshot: SelectorPrefetchSnapshot
+        let selectorEngine: OXQSelectorEngine<Element>
+        let memoizationContext: OXQQueryMemoizationContext<Element>
+        let isWarmCached: Bool
+    }
+
+    private struct WarmCacheState {
+        let appIdentifier: String
+        let snapshot: SelectorPrefetchSnapshot
+    }
+
     private let setValueSubmitStepDelaySeconds: TimeInterval = 0.2
     private let sendKeystrokesSubmitStepDelaySeconds: TimeInterval = 0.3
     private let postActivationClickDelaySeconds: TimeInterval = 0.2
     private let textInputFocusRetryDelaySeconds: TimeInterval = 0.2
     private let textInputFocusRetryMaxAttempts = 7
+    private var warmCacheState: WarmCacheState?
 
     func run(
         request: QueryRequest,
+        mode: QueryExecutionMode = .liveRefresh,
         interaction: QueryInteractionRequest? = nil) throws -> QueryExecutionResult
     {
         let appIdentifier = request.appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -27,18 +54,118 @@ final class SelectorQueryService {
             throw QueryWorkbenchError.invalidMaxDepth
         }
 
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let syntaxTree = try OXQParser().parse(selector)
+        let requiredAttributeNames = Self.prefetchAttributeNames(for: syntaxTree)
+        let executionMode: QueryExecutionMode = interaction == nil ? mode : .liveRefresh
+        let context: QueryExecutionContext
+        if executionMode == .useWarmCache,
+           let warmSnapshot = self.usableWarmCache(
+               for: appIdentifier,
+               maxDepth: request.maxDepth,
+               requiredAttributeNames: requiredAttributeNames)
+        {
+            context = self.makeExecutionContext(from: warmSnapshot, isWarmCached: true)
+        } else {
+            guard let root = try self.resolveRootElement(appIdentifier: appIdentifier) else {
+                throw QueryWorkbenchError.applicationNotFound(appIdentifier)
+            }
+
+            let freshSnapshot = self.prefetchSnapshot(
+                root: root,
+                maxDepth: request.maxDepth,
+                attributeNames: requiredAttributeNames)
+            context = self.makeExecutionContext(from: freshSnapshot, isWarmCached: false)
+        }
+
+        let evaluation = context.selectorEngine.findAllWithMetrics(
+            matching: syntaxTree,
+            from: context.root,
+            maxDepth: request.maxDepth,
+            memoizationContext: context.memoizationContext)
+
+        if let interaction {
+            try self.performInteraction(
+                interaction,
+                matchedElements: evaluation.matches)
+            self.invalidateWarmCache()
+        }
+
+        let rows = evaluation.matches.enumerated().map { index, element in
+            self.buildRow(
+                element: element,
+                index: index + 1,
+                memoizationContext: context.memoizationContext,
+                snapshot: context.snapshot,
+                useLiveFrame: !context.isWarmCached)
+        }
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds &- startedAt) / 1_000_000.0
+
+        if interaction == nil, !context.isWarmCached {
+            self.warmCacheState = WarmCacheState(
+                appIdentifier: Self.cacheKey(for: appIdentifier),
+                snapshot: context.snapshot)
+        }
+
+        return QueryExecutionResult(
+            stats: QueryStats(
+                elapsedMilliseconds: elapsedMs,
+                usedWarmCache: context.isWarmCached,
+                traversedCount: evaluation.traversedNodeCount,
+                matchedCount: evaluation.matches.count,
+                appIdentifier: appIdentifier,
+                selector: selector),
+            rows: rows)
+    }
+
+    func warmCache(request: QueryRequest) throws {
+        let appIdentifier = request.appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !appIdentifier.isEmpty else {
+            throw QueryWorkbenchError.missingAppIdentifier
+        }
+        guard request.maxDepth > 0 else {
+            throw QueryWorkbenchError.invalidMaxDepth
+        }
+
         guard let root = try self.resolveRootElement(appIdentifier: appIdentifier) else {
             throw QueryWorkbenchError.applicationNotFound(appIdentifier)
         }
 
+        let warmupSyntaxTree = try OXQParser().parse("*")
+        let requiredAttributeNames = Self.prefetchAttributeNames(for: warmupSyntaxTree)
+        let snapshot = self.prefetchSnapshot(
+            root: root,
+            maxDepth: request.maxDepth,
+            attributeNames: requiredAttributeNames)
+        self.warmCacheState = WarmCacheState(
+            appIdentifier: Self.cacheKey(for: appIdentifier),
+            snapshot: snapshot)
+    }
+
+    func invalidateWarmCache() {
+        self.warmCacheState = nil
+    }
+
+    private func makeExecutionContext(
+        from snapshot: SelectorPrefetchSnapshot,
+        isWarmCached: Bool) -> QueryExecutionContext
+    {
         let childrenProvider: (Element) -> [Element] = { element in
-            element.children(strict: false, includeApplicationExtras: element == root) ?? []
+            snapshot.childrenByElement[element] ?? []
         }
         let roleProvider: (Element) -> String? = { element in
-            element.role()
+            snapshot.roleByElement[element] ??
+                snapshot.attributeValuesByElement[element]?[AXAttributeNames.kAXRoleAttribute]
         }
         let attributeValueProvider: (Element, String) -> String? = { element, attributeName in
-            Self.stringValue(for: element, attributeName: attributeName)
+            let canonicalName = Self.canonicalAttributeName(attributeName)
+            if let prefetched = snapshot.attributeValuesByElement[element]?[canonicalName] {
+                return prefetched
+            }
+            if snapshot.prefetchedAttributeNames.contains(canonicalName) {
+                return nil
+            }
+            return Self.stringValue(for: element, attributeName: canonicalName)
         }
 
         let selectorEngine = OXQSelectorEngine<Element>(
@@ -49,55 +176,82 @@ final class SelectorQueryService {
         let memoizationContext = OXQQueryMemoizationContext<Element>(
             childrenProvider: childrenProvider,
             roleProvider: roleProvider,
-            attributeValueProvider: attributeValueProvider)
+            attributeValueProvider: attributeValueProvider,
+            preferDerivedComputedName: true)
 
-        let startedAt = DispatchTime.now().uptimeNanoseconds
-        let evaluation = try selectorEngine.findAllWithMetrics(
-            matching: selector,
-            from: root,
-            maxDepth: request.maxDepth,
-            memoizationContext: memoizationContext)
+        return QueryExecutionContext(
+            root: snapshot.root,
+            snapshot: snapshot,
+            selectorEngine: selectorEngine,
+            memoizationContext: memoizationContext,
+            isWarmCached: isWarmCached)
+    }
 
-        if let interaction {
-            try self.performInteraction(
-                interaction,
-                matchedElements: evaluation.matches)
+    private func usableWarmCache(
+        for appIdentifier: String,
+        maxDepth: Int,
+        requiredAttributeNames: Set<String>) -> SelectorPrefetchSnapshot?
+    {
+        guard let warmCacheState else { return nil }
+        guard warmCacheState.appIdentifier == Self.cacheKey(for: appIdentifier) else { return nil }
+        guard warmCacheState.snapshot.maxDepth >= maxDepth else { return nil }
+        guard warmCacheState.snapshot.prefetchedAttributeNames.isSuperset(of: requiredAttributeNames) else {
+            return nil
         }
 
-        let rows = evaluation.matches.enumerated().map { index, element in
-            self.buildRow(
-                element: element,
-                index: index + 1,
-                memoizationContext: memoizationContext)
+        if let currentPID = self.resolveCurrentAppPID(for: appIdentifier),
+           let cachedPID = warmCacheState.snapshot.appPID,
+           currentPID != cachedPID
+        {
+            return nil
         }
 
-        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds &- startedAt) / 1_000_000.0
+        return warmCacheState.snapshot
+    }
 
-        return QueryExecutionResult(
-            stats: QueryStats(
-                elapsedMilliseconds: elapsedMs,
-                traversedCount: evaluation.traversedNodeCount,
-                matchedCount: evaluation.matches.count,
-                appIdentifier: appIdentifier,
-                selector: selector),
-            rows: rows)
+    private func resolveCurrentAppPID(for appIdentifier: String) -> pid_t? {
+        let normalizedIdentifier = appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+
+        if normalizedIdentifier.caseInsensitiveCompare("focused") == .orderedSame {
+            if let frontmost = RunningApplicationHelper.frontmostApplication,
+               frontmost.processIdentifier != currentPID
+            {
+                return frontmost.processIdentifier
+            }
+            return FocusedApplicationTracker.shared.lastExternalApplication?.processIdentifier
+        }
+
+        if let pid = pid_t(normalizedIdentifier) {
+            return pid
+        }
+
+        return self.findRunningApplication(matching: normalizedIdentifier)?.processIdentifier
+    }
+
+    private static func cacheKey(for appIdentifier: String) -> String {
+        appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func buildRow(
         element: Element,
         index: Int,
-        memoizationContext: OXQQueryMemoizationContext<Element>) -> QueryResultRow
+        memoizationContext: OXQQueryMemoizationContext<Element>,
+        snapshot: SelectorPrefetchSnapshot,
+        useLiveFrame: Bool) -> QueryResultRow
     {
-        let computedNameDetails = element.computedNameDetails()
-        let role = element.role() ?? "AXUnknown"
+        let computedNameDetails = memoizationContext.computedNameDetails(of: element)
+        let role = memoizationContext.role(of: element) ?? "AXUnknown"
 
         let computedName = Self.normalize(computedNameDetails?.value)
         let computedNameSource = Self.normalize(computedNameDetails?.source)
-        let title = Self.normalize(element.title())
-        let value = Self.normalize(Self.preferredValueString(for: element))
-        let identifier = Self.normalize(element.identifier())
-        let descriptionText = Self.normalize(element.descriptionText())
-        let path = Self.normalize(element.generatePathString())
+        let title = Self.normalize(memoizationContext.attributeValue(of: element, attributeName: AXAttributeNames.kAXTitleAttribute))
+        let value = Self.normalize(Self.preferredValueString(for: element, memoizationContext: memoizationContext))
+        let identifier = Self.normalize(
+            memoizationContext.attributeValue(of: element, attributeName: AXAttributeNames.kAXIdentifierAttribute))
+        let descriptionText = Self.normalize(
+            memoizationContext.attributeValue(of: element, attributeName: AXAttributeNames.kAXDescriptionAttribute))
+        let path = Self.normalize(Self.cachedPathString(for: element, snapshot: snapshot))
 
         let resultName: String
         let resultNameSource: String?
@@ -125,7 +279,7 @@ final class SelectorQueryService {
             id: index,
             index: index,
             role: role,
-            frame: Self.visibleFrame(for: element),
+            frame: useLiveFrame ? Self.visibleFrame(for: element) : nil,
             name: resultName,
             nameSource: resultNameSource,
             title: title,
@@ -136,6 +290,269 @@ final class SelectorQueryService {
             focused: focused,
             childCount: memoizationContext.children(of: element).count,
             path: path)
+    }
+
+    private static func cachedPathString(for element: Element, snapshot: SelectorPrefetchSnapshot) -> String {
+        var chain: [Element] = []
+        var visited = Set<Element>()
+        var current: Element? = element
+
+        while let node = current, visited.insert(node).inserted {
+            chain.append(node)
+            current = snapshot.parentByElement[node]
+        }
+
+        return chain.reversed().map { node in
+            var parts: [String] = []
+            let role = snapshot.roleByElement[node] ??
+                snapshot.attributeValuesByElement[node]?[AXAttributeNames.kAXRoleAttribute] ??
+                "AXUnknown"
+            parts.append("Role: \(role)")
+
+            if let title = snapshot.attributeValuesByElement[node]?[AXAttributeNames.kAXTitleAttribute], !title.isEmpty {
+                parts.append("Title: '\(title)'")
+            }
+
+            if let identifier = snapshot.attributeValuesByElement[node]?[AXAttributeNames.kAXIdentifierAttribute],
+               !identifier.isEmpty
+            {
+                parts.append("ID: '\(identifier)'")
+            }
+
+            return parts.joined(separator: ", ")
+        }.joined(separator: " -> ")
+    }
+
+    private func prefetchSnapshot(
+        root: Element,
+        maxDepth: Int,
+        attributeNames: Set<String>) -> SelectorPrefetchSnapshot
+    {
+        let safeMaxDepth = max(0, maxDepth)
+        let orderedAttributeNames = Array(attributeNames).sorted()
+
+        var childrenByElement: [Element: [Element]] = [:]
+        var parentByElement: [Element: Element] = [:]
+        var roleByElement: [Element: String] = [:]
+        var attributeValuesByElement: [Element: [String: String]] = [:]
+        var bestDepthByElement: [Element: Int] = [:]
+        var stack: [(element: Element, depth: Int, parent: Element?)] = [(root, 0, nil)]
+
+        while let entry = stack.popLast() {
+            let element = entry.element
+            let depth = entry.depth
+
+            if let parent = entry.parent {
+                parentByElement[element] = parent
+            }
+
+            if let bestDepth = bestDepthByElement[element], depth >= bestDepth {
+                continue
+            }
+
+            bestDepthByElement[element] = depth
+
+            let prefetchedAttributes = Self.batchFetchAttributeValues(
+                for: element,
+                attributeNames: orderedAttributeNames)
+            var attributes = attributeValuesByElement[element] ?? [:]
+            if !prefetchedAttributes.isEmpty {
+                attributes.merge(prefetchedAttributes) { _, new in new }
+            }
+            attributeValuesByElement[element] = attributes
+
+            if let role = prefetchedAttributes[AXAttributeNames.kAXRoleAttribute] ??
+                Self.stringValue(for: element, attributeName: AXAttributeNames.kAXRoleAttribute)
+            {
+                roleByElement[element] = role
+                var currentAttributes = attributeValuesByElement[element] ?? [:]
+                currentAttributes[AXAttributeNames.kAXRoleAttribute] = role
+                attributeValuesByElement[element] = currentAttributes
+            }
+
+            let children: [Element]
+            if depth < safeMaxDepth {
+                children = element.children(strict: false, includeApplicationExtras: element == root) ?? []
+            } else {
+                children = []
+            }
+
+            childrenByElement[element] = children
+            for child in children.reversed() {
+                stack.append((child, depth + 1, element))
+            }
+        }
+
+        return SelectorPrefetchSnapshot(
+            root: root,
+            appPID: Self.axPid(for: root),
+            maxDepth: safeMaxDepth,
+            childrenByElement: childrenByElement,
+            parentByElement: parentByElement,
+            roleByElement: roleByElement,
+            attributeValuesByElement: attributeValuesByElement,
+            prefetchedAttributeNames: attributeNames)
+    }
+
+    private static func batchFetchAttributeValues(
+        for element: Element,
+        attributeNames: [String]) -> [String: String]
+    {
+        guard !attributeNames.isEmpty else {
+            return [:]
+        }
+
+        let cfAttributeNames = attributeNames.map { $0 as CFString } as CFArray
+        var values: CFArray?
+        let status = AXUIElementCopyMultipleAttributeValues(
+            element.underlyingElement,
+            cfAttributeNames,
+            AXCopyMultipleAttributeOptions(rawValue: 0),
+            &values)
+
+        guard status == .success, let rawValues = values as? [Any] else {
+            var fallbackValues: [String: String] = [:]
+            for name in attributeNames {
+                if let value = Self.stringValue(for: element, attributeName: name) {
+                    fallbackValues[name] = value
+                }
+            }
+            return fallbackValues
+        }
+
+        var result: [String: String] = [:]
+        let pairCount = min(attributeNames.count, rawValues.count)
+        for index in 0..<pairCount {
+            let name = attributeNames[index]
+            if let value = Self.stringifyBatchAttributeValue(rawValues[index]) {
+                result[name] = value
+            }
+        }
+
+        if rawValues.count < attributeNames.count {
+            for name in attributeNames[rawValues.count...] {
+                if let value = Self.stringValue(for: element, attributeName: name) {
+                    result[name] = value
+                }
+            }
+        }
+
+        return result
+    }
+
+    private static func stringifyBatchAttributeValue(_ value: Any) -> String? {
+        if value is NSNull {
+            return nil
+        }
+
+        let object = value as AnyObject
+        let typeRef = object as CFTypeRef
+        if CFGetTypeID(typeRef) == AXValueGetTypeID() {
+            let axValue = unsafeDowncast(object, to: AXValue.self)
+            if AXValueGetType(axValue) == .axError {
+                return nil
+            }
+        }
+
+        return Self.stringify(value)
+    }
+
+    private static func prefetchAttributeNames(for syntaxTree: OXQSyntaxTree) -> Set<String> {
+        var names: Set<String> = [
+            AXAttributeNames.kAXRoleAttribute,
+            AXAttributeNames.kAXTitleAttribute,
+            AXAttributeNames.kAXValueAttribute,
+            AXAttributeNames.kAXIdentifierAttribute,
+            AXAttributeNames.kAXDescriptionAttribute,
+            AXAttributeNames.kAXHelpAttribute,
+            AXAttributeNames.kAXPlaceholderValueAttribute,
+            AXAttributeNames.kAXSelectedTextAttribute,
+            AXAttributeNames.kAXEnabledAttribute,
+            AXAttributeNames.kAXFocusedAttribute,
+            AXAttributeNames.kAXSubroleAttribute,
+            AXAttributeNames.kAXPIDAttribute,
+            AXAttributeNames.kAXRoleDescriptionAttribute,
+        ]
+
+        for selector in syntaxTree.selectors {
+            Self.collectAttributeNames(in: selector, into: &names)
+        }
+
+        return names
+    }
+
+    private static func collectAttributeNames(in selector: OXQSelector, into names: inout Set<String>) {
+        Self.collectAttributeNames(in: selector.leading, into: &names)
+        for link in selector.links {
+            Self.collectAttributeNames(in: link.compound, into: &names)
+        }
+    }
+
+    private static func collectAttributeNames(in compound: OXQCompound, into names: inout Set<String>) {
+        for attribute in compound.attributes {
+            Self.collectAttributeName(attribute.name, into: &names)
+        }
+
+        for pseudo in compound.pseudos {
+            switch pseudo {
+            case let .not(selectors):
+                for selector in selectors {
+                    Self.collectAttributeNames(in: selector, into: &names)
+                }
+            case let .has(argument):
+                switch argument {
+                case let .selectors(selectors):
+                    for selector in selectors {
+                        Self.collectAttributeNames(in: selector, into: &names)
+                    }
+                case let .relativeSelectors(relativeSelectors):
+                    for relativeSelector in relativeSelectors {
+                        Self.collectAttributeNames(in: relativeSelector.selector, into: &names)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func collectAttributeName(_ rawName: String, into names: inout Set<String>) {
+        let canonicalName = Self.canonicalAttributeName(rawName)
+        if canonicalName == AXMiscConstants.computedNameAttributeKey {
+            names.formUnion([
+                AXAttributeNames.kAXRoleAttribute,
+                AXAttributeNames.kAXTitleAttribute,
+                AXAttributeNames.kAXValueAttribute,
+                AXAttributeNames.kAXIdentifierAttribute,
+                AXAttributeNames.kAXDescriptionAttribute,
+                AXAttributeNames.kAXHelpAttribute,
+                AXAttributeNames.kAXPlaceholderValueAttribute,
+                AXAttributeNames.kAXSelectedTextAttribute,
+            ])
+            return
+        }
+
+        if canonicalName == AXMiscConstants.isIgnoredAttributeKey {
+            return
+        }
+
+        names.insert(canonicalName)
+    }
+
+    private static func canonicalAttributeName(_ name: String) -> String {
+        PathUtils.attributeKeyMappings[name.lowercased()] ?? name
+    }
+
+    private static func axPid(for element: Element) -> pid_t? {
+        if let pid = element.pid(), pid > 0 {
+            return pid
+        }
+
+        var pid: pid_t = 0
+        let status = AXUIElementGetPid(element.underlyingElement, &pid)
+        guard status == .success, pid > 0 else {
+            return nil
+        }
+
+        return pid
     }
 
     private static func visibleFrame(for element: Element) -> CGRect? {
@@ -300,7 +717,7 @@ final class SelectorQueryService {
     }
 
     private static func stringValue(for element: Element, attributeName: String) -> String? {
-        let canonicalName = PathUtils.attributeKeyMappings[attributeName.lowercased()] ?? attributeName
+        let canonicalName = Self.canonicalAttributeName(attributeName)
 
         switch canonicalName {
         case AXAttributeNames.kAXRoleAttribute:
@@ -502,16 +919,21 @@ final class SelectorQueryService {
         return Self.isNullLikeString(described) ? nil : described
     }
 
-    private static func preferredValueString(for element: Element) -> String? {
-        if let directValue: String = element.attribute(Attribute<String>(AXAttributeNames.kAXValueAttribute)) {
+    private static func preferredValueString(
+        for element: Element,
+        memoizationContext: OXQQueryMemoizationContext<Element>) -> String?
+    {
+        if let directValue = memoizationContext.attributeValue(
+            of: element,
+            attributeName: AXAttributeNames.kAXValueAttribute)
+        {
             return directValue
         }
 
-        if let normalizedValue = Self.stringify(element.value()) {
-            return normalizedValue
-        }
-
-        if let selectedText = element.selectedText() {
+        if let selectedText = memoizationContext.attributeValue(
+            of: element,
+            attributeName: AXAttributeNames.kAXSelectedTextAttribute)
+        {
             return selectedText
         }
 

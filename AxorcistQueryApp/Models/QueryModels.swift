@@ -38,6 +38,11 @@ struct QueryRequest {
     let maxDepth: Int
 }
 
+enum QueryExecutionMode {
+    case liveRefresh
+    case useWarmCache
+}
+
 struct QueryInteractionRequest {
     let resultIndex: Int
     let action: SelectorInteractionKind
@@ -46,6 +51,7 @@ struct QueryInteractionRequest {
 
 struct QueryStats {
     let elapsedMilliseconds: Double
+    let usedWarmCache: Bool
     let traversedCount: Int
     let matchedCount: Int
     let appIdentifier: String

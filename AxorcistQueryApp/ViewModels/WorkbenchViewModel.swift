@@ -4,6 +4,12 @@ import Foundation
 
 @MainActor
 final class WorkbenchViewModel: ObservableObject {
+    private enum QueryRunTrigger {
+        case manual
+        case typingCached
+        case typingLiveRefresh
+    }
+
     @Published var appIdentifier = "focused"
     @Published var selectorQuery = "AXButton[AXTitle*=\"Run\"]"
     @Published var maxDepthText = ""
@@ -26,11 +32,22 @@ final class WorkbenchViewModel: ObservableObject {
     private let overlayManager = QueryOverlayManager()
     private var listHoveredRowID: QueryResultRow.ID?
     private var overlayHoveredRowID: QueryResultRow.ID?
+    private let typingLiveRefreshDebounceNanoseconds: UInt64 = 3_000_000_000
+    private let appWarmDebounceNanoseconds: UInt64 = 300_000_000
+    private var typingDebounceTask: Task<Void, Never>?
+    private var appWarmDebounceTask: Task<Void, Never>?
+    private var queryRunToken: UInt64 = 0
+    private var appWarmToken: UInt64 = 0
 
     init() {
         self.overlayManager.onOverlayHoverChanged = { [weak self] rowID in
             self?.setOverlayHoveredRowID(rowID)
         }
+    }
+
+    deinit {
+        self.typingDebounceTask?.cancel()
+        self.appWarmDebounceTask?.cancel()
     }
 
     var filteredRows: [QueryResultRow] {
@@ -89,20 +106,47 @@ final class WorkbenchViewModel: ObservableObject {
         self.overlayManager.setExternalHighlightedRowID(rowID)
     }
 
-    func runQuery() {
-        do {
-            let request = try self.makeRequest()
-            self.errorMessage = nil
-            self.isRunning = true
-            let result = try service.run(request: request)
-            self.apply(result: result)
-            self.statusMessage = "Query complete. \(result.stats.matchedCount) matches."
-            self.isRunning = false
-        } catch {
-            self.isRunning = false
-            self.errorMessage = error.localizedDescription
-            self.statusMessage = "Query failed"
+    func handleAppIdentifierChanged() {
+        self.typingDebounceTask?.cancel()
+        self.appWarmDebounceTask?.cancel()
+        self.service.invalidateWarmCache()
+        self.bumpQueryRunToken()
+
+        let trimmedAppIdentifier = self.appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAppIdentifier.isEmpty else {
+            return
         }
+
+        let warmToken = self.bumpAppWarmToken()
+        self.appWarmDebounceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: self.appWarmDebounceNanoseconds)
+            guard !Task.isCancelled, warmToken == self.appWarmToken else {
+                return
+            }
+            do {
+                let request = try self.makeRequest()
+                try self.service.warmCache(request: request)
+                self.queueTypingQueryRuns()
+            } catch {
+                // Suppress warm-up errors during app id typing.
+            }
+        }
+    }
+
+    func handleSelectorQueryChanged() {
+        self.typingDebounceTask?.cancel()
+        self.queueTypingQueryRuns()
+    }
+
+    func runQuery() {
+        self.typingDebounceTask?.cancel()
+        self.appWarmDebounceTask?.cancel()
+        self.bumpAppWarmToken()
+        let runToken = self.bumpQueryRunToken()
+        self.executeQuery(
+            mode: .liveRefresh,
+            trigger: .manual,
+            runToken: runToken)
     }
 
     func performInteraction(_ action: SelectorInteractionKind) {
@@ -119,10 +163,18 @@ final class WorkbenchViewModel: ObservableObject {
                 action: action,
                 value: action.requiresValue ? rawValue : nil)
 
+            self.typingDebounceTask?.cancel()
+            self.appWarmDebounceTask?.cancel()
+            self.bumpAppWarmToken()
+            self.service.invalidateWarmCache()
+            self.bumpQueryRunToken()
             self.errorMessage = nil
             self.isRunning = true
 
-            let result = try service.run(request: request, interaction: interaction)
+            let result = try service.run(
+                request: request,
+                mode: .liveRefresh,
+                interaction: interaction)
             self.apply(result: result)
             self.selectedRowID = selected.id
             self.statusMessage = "Interaction '\(action.rawValue)' succeeded on result \(selected.index)."
@@ -150,6 +202,92 @@ final class WorkbenchViewModel: ObservableObject {
             appIdentifier: appIdentifier,
             selector: selectorQuery,
             maxDepth: maxDepth)
+    }
+
+    private func queueTypingQueryRuns() {
+        let trimmedAppIdentifier = self.appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSelector = self.selectorQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedAppIdentifier.isEmpty, !trimmedSelector.isEmpty else {
+            return
+        }
+
+        let cachedRunToken = self.bumpQueryRunToken()
+        self.executeQuery(
+            mode: .useWarmCache,
+            trigger: .typingCached,
+            runToken: cachedRunToken)
+
+        self.typingDebounceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: self.typingLiveRefreshDebounceNanoseconds)
+            guard !Task.isCancelled else {
+                return
+            }
+            let liveRunToken = self.bumpQueryRunToken()
+            self.executeQuery(
+                mode: .liveRefresh,
+                trigger: .typingLiveRefresh,
+                runToken: liveRunToken)
+        }
+    }
+
+    private func executeQuery(
+        mode: QueryExecutionMode,
+        trigger: QueryRunTrigger,
+        runToken: UInt64)
+    {
+        do {
+            let request = try self.makeRequest()
+            self.errorMessage = nil
+            self.isRunning = true
+            let result = try self.service.run(request: request, mode: mode)
+            guard runToken == self.queryRunToken else {
+                self.isRunning = false
+                return
+            }
+
+            self.apply(result: result)
+            self.isRunning = false
+
+            switch trigger {
+            case .manual:
+                self.statusMessage = "Query complete. \(result.stats.matchedCount) matches."
+            case .typingCached:
+                self.statusMessage = "Cached preview. \(result.stats.matchedCount) matches."
+            case .typingLiveRefresh:
+                self.statusMessage = "Live refresh complete. \(result.stats.matchedCount) matches."
+            }
+        } catch {
+            guard runToken == self.queryRunToken else {
+                self.isRunning = false
+                return
+            }
+
+            self.isRunning = false
+
+            switch trigger {
+            case .typingCached:
+                // Ignore transient typing parse and cache misses here.
+                return
+            case .manual:
+                self.errorMessage = error.localizedDescription
+                self.statusMessage = "Query failed"
+            case .typingLiveRefresh:
+                self.errorMessage = error.localizedDescription
+                self.statusMessage = "Live refresh failed"
+            }
+        }
+    }
+
+    @discardableResult
+    private func bumpQueryRunToken() -> UInt64 {
+        self.queryRunToken &+= 1
+        return self.queryRunToken
+    }
+
+    @discardableResult
+    private func bumpAppWarmToken() -> UInt64 {
+        self.appWarmToken &+= 1
+        return self.appWarmToken
     }
 
     private func apply(result: QueryExecutionResult) {

@@ -6,6 +6,7 @@ struct OXQHighlightedEditor: NSViewRepresentable {
     @Binding var text: String
 
     var fontSize: CGFloat = 16
+    var onRunQuery: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -126,7 +127,7 @@ struct OXQHighlightedEditor: NSViewRepresentable {
                     self.lastEditWasDeletion = false
                 }
                 if let replacementString, replacementString.count == 1, let char = replacementString.first {
-                    self.lastEditInsertedRoleTrigger = char == ">" || char == "," || char == "("
+                    self.lastEditInsertedRoleTrigger = char == ">" || char == "," || char == "(" || char == ":"
                 } else {
                     self.lastEditInsertedRoleTrigger = false
                 }
@@ -139,6 +140,12 @@ struct OXQHighlightedEditor: NSViewRepresentable {
             _ textView: NSTextView,
             doCommandBy commandSelector: Selector) -> Bool
         {
+            if self.isCommandEnter(commandSelector) {
+                self.dismissSuggestionPopover()
+                self.parent.onRunQuery?()
+                return true
+            }
+
             if commandSelector == #selector(NSResponder.complete(_:)) {
                 self.scheduleAutocompleteRefresh(force: true)
                 return true
@@ -170,6 +177,17 @@ struct OXQHighlightedEditor: NSViewRepresentable {
             default:
                 return false
             }
+        }
+
+        private func isCommandEnter(_ commandSelector: Selector) -> Bool {
+            let isEnterCommand =
+                commandSelector == #selector(NSResponder.insertNewline(_:)) ||
+                commandSelector == #selector(NSResponder.insertLineBreak(_:)) ||
+                commandSelector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:))
+            guard isEnterCommand else { return false }
+
+            let flags = NSApp.currentEvent?.modifierFlags ?? []
+            return flags.contains(.command)
         }
 
         func applyHighlight(to content: String, preserveSelection: Bool) {
@@ -411,6 +429,8 @@ private struct OXQSuggestionPopoverView: View {
             return "Roles"
         case .attribute:
             return "Attributes"
+        case .function:
+            return "Functions"
         }
     }
 
@@ -420,6 +440,8 @@ private struct OXQSuggestionPopoverView: View {
             return "ROLE"
         case .attribute:
             return "ATTR"
+        case .function:
+            return "FUNC"
         }
     }
 
@@ -487,6 +509,7 @@ private struct OXQSuggestionPopoverView: View {
 private enum OXQCompletionDomain {
     case role
     case attribute
+    case function
 }
 
 private struct OXQAutocompleteQuery {
@@ -591,6 +614,18 @@ private struct OXQAutocompleteEngine {
                 hostRole: nil,
                 previousAttribute: nil)
 
+        case .function:
+            guard !prefix.isEmpty || allowEmptyRolePrefix else {
+                return nil
+            }
+            return OXQAutocompleteQuery(
+                domain: .function,
+                prefix: prefix,
+                replacementRange: prefixRange,
+                previousRole: nil,
+                hostRole: nil,
+                previousAttribute: nil)
+
         case .none:
             return nil
         }
@@ -609,6 +644,8 @@ private struct OXQAutocompleteEngine {
                 hostRole: query.hostRole,
                 previousAttribute: query.previousAttribute,
                 limit: limit)
+        case .function:
+            return self.rankFunctionSuggestions(prefix: query.prefix, limit: limit)
         }
     }
 
@@ -753,6 +790,11 @@ private struct OXQAutocompleteEngine {
         "focused",
         "domid",
         "domclass",
+    ]
+
+    private static let functionTokens: [String] = [
+        "has",
+        "not",
     ]
 
     private static let roleCommonBoost: [String: Int] = [
@@ -952,6 +994,19 @@ private struct OXQAutocompleteEngine {
         }
 
         return output
+    }
+
+    private func rankFunctionSuggestions(prefix: String, limit: Int) -> [String] {
+        let lowerPrefix = prefix.lowercased()
+
+        let scored = Self.functionTokens.compactMap { functionName -> (String, Int)? in
+            guard let prefixScore = self.prefixMatchScore(token: functionName, lowerPrefix: lowerPrefix) else {
+                return nil
+            }
+            return (functionName, prefixScore + 400)
+        }
+
+        return self.sortedTokens(scored: scored, limit: limit)
     }
 
     private func prefixMatchScore(token: String, lowerPrefix: String) -> Int? {
@@ -1243,6 +1298,9 @@ private struct OXQAutocompleteEngine {
             guard stream.peek() == nil else {
                 return .none
             }
+            if self.isAfterImplicitDescendantCombinator(in: text, cursorUTF16: clampedCursor) {
+                return .role
+            }
             return .none
         } catch let signal as OXQAutocompleteGrammarSignal {
             switch signal {
@@ -1250,6 +1308,8 @@ private struct OXQAutocompleteEngine {
                 return .role
             case .needAttribute:
                 return .attribute
+            case .needFunction:
+                return .function
             case .needOther, .invalid:
                 return .none
             }
@@ -1383,7 +1443,7 @@ private struct OXQAutocompleteEngine {
 
         guard let pseudoName = stream.consumeIdentifier() else {
             if stream.isAtEnd {
-                throw OXQAutocompleteGrammarSignal.needOther
+                throw OXQAutocompleteGrammarSignal.needFunction
             }
             throw OXQAutocompleteGrammarSignal.invalid
         }
@@ -1548,6 +1608,23 @@ private struct OXQAutocompleteEngine {
         return NSRange(location: location, length: max(0, length))
     }
 
+    private func isAfterImplicitDescendantCombinator(in text: String, cursorUTF16: Int) -> Bool {
+        guard cursorUTF16 > 0 else { return false }
+        let cursorIndex = String.Index(utf16Offset: cursorUTF16, in: text)
+        guard cursorIndex > text.startIndex else { return false }
+
+        let previousIndex = text.index(before: cursorIndex)
+        guard text[previousIndex].isWhitespaceLike else { return false }
+        guard let previousNonWhitespace = self.previousNonWhitespaceCharacter(in: text, before: cursorIndex) else {
+            return false
+        }
+
+        return self.isIdentifierContinue(previousNonWhitespace) ||
+            previousNonWhitespace == "*" ||
+            previousNonWhitespace == "]" ||
+            previousNonWhitespace == ")"
+    }
+
     private func previousNonWhitespaceCharacter(in text: String, before index: String.Index) -> Character? {
         var cursor = index
         while cursor > text.startIndex {
@@ -1584,12 +1661,14 @@ private struct OXQAutocompleteEngine {
 private enum OXQAutocompleteGrammarExpectation {
     case role
     case attribute
+    case function
     case none
 }
 
 private enum OXQAutocompleteGrammarSignal: Error {
     case needRole
     case needAttribute
+    case needFunction
     case needOther
     case invalid
 }

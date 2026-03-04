@@ -22,9 +22,16 @@ struct WorkbenchView: View {
         .onAppear {
             model.refreshPermissions()
             model.refreshRunningApps()
+            model.handleAppIdentifierChanged()
         }
         .onDisappear {
             model.setOverlayVisibility(false)
+        }
+        .onChange(of: model.appIdentifier) { _, _ in
+            model.handleAppIdentifierChanged()
+        }
+        .onChange(of: model.selectorQuery) { _, _ in
+            model.handleSelectorQueryChanged()
         }
     }
 
@@ -103,7 +110,10 @@ struct WorkbenchView: View {
                 .disabled(model.isRunning)
             }
 
-            OXQHighlightedEditor(text: $model.selectorQuery, fontSize: 16)
+            OXQHighlightedEditor(
+                text: $model.selectorQuery,
+                fontSize: 16,
+                onRunQuery: { model.runQuery() })
                 .frame(minHeight: 140)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
         }
@@ -193,7 +203,7 @@ struct WorkbenchView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     statLine("App", stats.appIdentifier)
                     statLine("Selector", stats.selector)
-                    statLine("Elapsed", String(format: "%.2f ms", stats.elapsedMilliseconds))
+                    elapsedStatLine(stats)
                     statLine("Traversed", "\(stats.traversedCount)")
                     statLine("Matched", "\(stats.matchedCount)")
                 }
@@ -303,6 +313,30 @@ struct WorkbenchView: View {
             Text(value.isEmpty ? "-" : value)
                 .font(.system(.body, design: .monospaced))
                 .textSelection(.enabled)
+        }
+    }
+
+    private func elapsedStatLine(_ stats: QueryStats) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Elapsed")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Text(String(format: "%.2f ms", stats.elapsedMilliseconds))
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+
+                Text(stats.usedWarmCache ? "CACHED" : "LIVE")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .foregroundStyle(stats.usedWarmCache ? Color.orange : Color.green)
+                    .background(
+                        (stats.usedWarmCache ? Color.orange : Color.green)
+                            .opacity(0.14))
+                    .clipShape(Capsule(style: .continuous))
+            }
         }
     }
 }
