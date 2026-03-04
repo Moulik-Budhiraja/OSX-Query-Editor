@@ -14,6 +14,7 @@ final class WorkbenchViewModel: ObservableObject {
     @Published var editorMode: WorkbenchEditorMode = .query
     @Published var selectorQuery = "AXButton[AXTitle*=\"Run\"]"
     @Published var actionProgram = ""
+    @Published private(set) var editorFocusRequestID: UInt64 = 0
     @Published var maxDepthText = ""
     @Published var searchText = ""
     @Published var showResultOverlays = false
@@ -166,8 +167,8 @@ final class WorkbenchViewModel: ObservableObject {
         }
     }
 
-    func toggleEditorMode() {
-        self.editorMode = (self.editorMode == .query) ? .action : .query
+    func requestEditorFocus() {
+        self.editorFocusRequestID &+= 1
     }
 
     func runQuery() {
@@ -202,7 +203,6 @@ final class WorkbenchViewModel: ObservableObject {
 
         do {
             let output = try OXAExecutor.execute(programSource: trimmedProgram)
-            self.service.invalidateWarmCache()
             let firstLine = output.split(separator: "\n").first.map(String.init) ?? "Action complete."
             self.statusMessage = firstLine
         } catch {

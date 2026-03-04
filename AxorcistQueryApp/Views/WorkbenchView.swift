@@ -112,7 +112,7 @@ struct WorkbenchView: View {
                 .frame(width: 180)
 
                 Button {
-                    model.toggleEditorMode()
+                    model.requestEditorFocus()
                 } label: {
                     Text("⌘I")
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -124,7 +124,7 @@ struct WorkbenchView: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut("i", modifiers: [.command])
-                .help("Toggle Query/Action mode")
+                .help("Focus editor")
 
                 Spacer()
                 Button(model.editorMode == .query ? "Run Query" : "Run Action") {
@@ -132,6 +132,15 @@ struct WorkbenchView: View {
                 }
                 .keyboardShortcut(.return, modifiers: [.command])
                 .disabled(model.isRunning)
+
+                Text("⌘↩")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.secondary.opacity(0.12))
+                    .clipShape(Capsule(style: .continuous))
+                    .help("Run with Command-Return")
             }
 
             if model.editorMode == .query {
@@ -140,6 +149,7 @@ struct WorkbenchView: View {
                 OXQHighlightedEditor(
                     text: $model.selectorQuery,
                     fontSize: 16,
+                    focusRequestID: model.editorFocusRequestID,
                     onRunQuery: { model.runActiveEditorProgram() })
                     .frame(minHeight: 140)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -149,6 +159,7 @@ struct WorkbenchView: View {
                 OXAHighlightedEditor(
                     text: $model.actionProgram,
                     fontSize: 16,
+                    focusRequestID: model.editorFocusRequestID,
                     onRunAction: { model.runActiveEditorProgram() })
                     .frame(minHeight: 140)
                     .clipShape(RoundedRectangle(cornerRadius: 10))

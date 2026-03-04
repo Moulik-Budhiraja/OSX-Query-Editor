@@ -6,6 +6,7 @@ struct OXQHighlightedEditor: NSViewRepresentable {
     @Binding var text: String
 
     var fontSize: CGFloat = 16
+    var focusRequestID: UInt64 = 0
     var onRunQuery: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -58,6 +59,11 @@ struct OXQHighlightedEditor: NSViewRepresentable {
         guard let textView = context.coordinator.textView else { return }
         textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
 
+        if context.coordinator.lastFocusRequestID != self.focusRequestID {
+            context.coordinator.lastFocusRequestID = self.focusRequestID
+            context.coordinator.focusTextView()
+        }
+
         if textView.string != text {
             context.coordinator.applyHighlight(to: text, preserveSelection: true)
             context.coordinator.refreshAutocomplete()
@@ -68,6 +74,7 @@ struct OXQHighlightedEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: OXQHighlightedEditor
         weak var textView: NSTextView?
+        var lastFocusRequestID: UInt64 = 0
         private var isApplying = false
         private var lastEditInsertedRoleTrigger = false
         private var lastEditWasDeletion = false
@@ -188,6 +195,14 @@ struct OXQHighlightedEditor: NSViewRepresentable {
 
             let flags = NSApp.currentEvent?.modifierFlags ?? []
             return flags.contains(.command)
+        }
+
+        func focusTextView() {
+            guard let textView else { return }
+            DispatchQueue.main.async {
+                guard let window = textView.window else { return }
+                window.makeFirstResponder(textView)
+            }
         }
 
         func applyHighlight(to content: String, preserveSelection: Bool) {

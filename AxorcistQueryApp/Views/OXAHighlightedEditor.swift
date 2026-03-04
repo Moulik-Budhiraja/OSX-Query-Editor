@@ -5,6 +5,7 @@ struct OXAHighlightedEditor: NSViewRepresentable {
     @Binding var text: String
 
     var fontSize: CGFloat = 16
+    var focusRequestID: UInt64 = 0
     var onRunAction: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -57,6 +58,11 @@ struct OXAHighlightedEditor: NSViewRepresentable {
         guard let textView = context.coordinator.textView else { return }
         textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
 
+        if context.coordinator.lastFocusRequestID != self.focusRequestID {
+            context.coordinator.lastFocusRequestID = self.focusRequestID
+            context.coordinator.focusTextView()
+        }
+
         if textView.string != text {
             context.coordinator.applyHighlight(to: text, preserveSelection: true)
         }
@@ -66,6 +72,7 @@ struct OXAHighlightedEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: OXAHighlightedEditor
         weak var textView: NSTextView?
+        var lastFocusRequestID: UInt64 = 0
         private var isApplying = false
 
         init(parent: OXAHighlightedEditor) {
@@ -119,6 +126,14 @@ struct OXAHighlightedEditor: NSViewRepresentable {
 
             let flags = NSApp.currentEvent?.modifierFlags ?? []
             return flags.contains(.command)
+        }
+
+        func focusTextView() {
+            guard let textView else { return }
+            DispatchQueue.main.async {
+                guard let window = textView.window else { return }
+                window.makeFirstResponder(textView)
+            }
         }
     }
 }
