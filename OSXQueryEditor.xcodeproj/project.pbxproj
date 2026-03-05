@@ -34,7 +34,6 @@
 		A646915C6A9FBBC82B144438 /* OSXQueryEditor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OSXQueryEditor.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A92B317534FA0A02B3E28857 /* OSXQueryEditorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSXQueryEditorApp.swift; sourceTree = "<group>"; };
 		A9420DDF448CB789C0FB014B /* WorkbenchViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkbenchViewModel.swift; sourceTree = "<group>"; };
-		BD0C981A074912BC44C12F6F /* axorcist */ = {isa = PBXFileReference; lastKnownFileType = folder; name = axorcist; path = ../axorcist; sourceTree = SOURCE_ROOT; };
 		CEA837C0EBF599D611142DDD /* QueryOverlayManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryOverlayManager.swift; sourceTree = "<group>"; };
 		F9F9BF95707C57A39FED769D /* WorkbenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkbenchView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -55,7 +54,6 @@
 			isa = PBXGroup;
 			children = (
 				6940045B44EC050AA59325E7 /* OSXQueryEditor */,
-				AFA7745E5023FF7FE4729E6C /* Packages */,
 				A51CBDB2A9ED67592C310E81 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -119,14 +117,6 @@
 			path = Views;
 			sourceTree = "<group>";
 		};
-		AFA7745E5023FF7FE4729E6C /* Packages */ = {
-			isa = PBXGroup;
-			children = (
-				BD0C981A074912BC44C12F6F /* axorcist */,
-			);
-			name = Packages;
-			sourceTree = "<group>";
-		};
 		FD7E2384555D305EAE2BE0B3 /* ViewModels */ = {
 			isa = PBXGroup;
 			children = (
@@ -183,7 +173,7 @@
 			mainGroup = 1B1DD145096C01447A1211A8;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				FDA073BF6469389DC4B03D91 /* XCLocalSwiftPackageReference "../axorcist" */,
+				A9C5D2B724F949F56DD34DF9 /* XCRemoteSwiftPackageReference "OSX-Query" */,
 			);
 			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
@@ -413,16 +403,21 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		FDA073BF6469389DC4B03D91 /* XCLocalSwiftPackageReference "../axorcist" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../axorcist;
+/* Begin XCRemoteSwiftPackageReference section */
+		A9C5D2B724F949F56DD34DF9 /* XCRemoteSwiftPackageReference "OSX-Query" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Moulik-Budhiraja/OSX-Query";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
 		};
-/* End XCLocalSwiftPackageReference section */
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		261678F98491B0C0028AE8DB /* AXorcist */ = {
 			isa = XCSwiftPackageProductDependency;
+			package = A9C5D2B724F949F56DD34DF9 /* XCRemoteSwiftPackageReference "OSX-Query" */;
 			productName = AXorcist;
 		};
 /* End XCSwiftPackageProductDependency section */

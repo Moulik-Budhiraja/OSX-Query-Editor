@@ -1,5 +1,5 @@
 {
-  "originHash" : "e79c7a70c9e19a1935ba3826ed088d028af8c1b6d60b165efc36dbe87db04d16",
+  "originHash" : "3a12eb2746d2ef81d091de1527048ab31bfa10229f651669d40e8b728fb12cc3",
   "pins" : [
     {
       "identity" : "commander",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "9e349575c8e3c6745e81fe19e5bb5efa01b078ce",
         "version" : "0.2.1"
+      }
+    },
+    {
+      "identity" : "osx-query",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Moulik-Budhiraja/OSX-Query",
+      "state" : {
+        "branch" : "main",
+        "revision" : "1605b87b2b53831379071eed821d09233c19a925"
       }
     },
     {

@@ -5,7 +5,8 @@ options:
     macOS: "14.0"
 packages:
   AXorcist:
-    path: ../axorcist
+    url: https://github.com/Moulik-Budhiraja/OSX-Query
+    branch: main
 targets:
   OSXQueryEditor:
     type: application
