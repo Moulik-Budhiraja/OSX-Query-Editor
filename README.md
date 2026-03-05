@@ -1,4 +1,4 @@
-# AxorcistQueryApp
+# OSX Query Editor
 
 Native macOS Xcode app for AXorcist selector query workflow (the same domain as `axorc` interactive selector mode).
 
@@ -22,12 +22,12 @@ This app intentionally focuses on query-language features only:
 
 ```bash
 cd /Users/moulik/Documents/programming/axorcist-tools
-open AxorcistQueryApp.xcodeproj
+open OSXQueryEditor.xcodeproj
 ```
 
 ## Build From CLI
 
 ```bash
 cd /Users/moulik/Documents/programming/axorcist-tools
-xcodebuild -project AxorcistQueryApp.xcodeproj -scheme AxorcistQueryApp -configuration Debug build
+xcodebuild -project OSXQueryEditor.xcodeproj -scheme OSXQueryEditor -configuration Debug build
 ```

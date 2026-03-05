@@ -1,4 +1,4 @@
-name: AxorcistQueryApp
+name: OSXQueryEditor
 options:
   minimumXcodeGenVersion: 2.44.0
   deploymentTarget:
@@ -7,18 +7,18 @@ packages:
   AXorcist:
     path: ../axorcist
 targets:
-  AxorcistQueryApp:
+  OSXQueryEditor:
     type: application
     platform: macOS
     sources:
-      - AxorcistQueryApp
+      - OSXQueryEditor
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.axorcist.queryapp
-        PRODUCT_NAME: AxorcistQueryApp
+        PRODUCT_BUNDLE_IDENTIFIER: com.osx.queryeditor
+        PRODUCT_NAME: OSXQueryEditor
         SWIFT_VERSION: 6.0
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Axorcist Query App
+        INFOPLIST_KEY_CFBundleDisplayName: OSX Query Editor
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
         CODE_SIGN_STYLE: Automatic

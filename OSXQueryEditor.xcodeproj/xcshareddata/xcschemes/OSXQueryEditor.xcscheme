@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "51258DDB41511AF845CAC52F"
-               BuildableName = "AxorcistQueryApp.app"
-               BlueprintName = "AxorcistQueryApp"
-               ReferencedContainer = "container:AxorcistQueryApp.xcodeproj">
+               BlueprintIdentifier = "389DAA5DBC14EF518A552A09"
+               BuildableName = "OSXQueryEditor.app"
+               BlueprintName = "OSXQueryEditor"
+               ReferencedContainer = "container:OSXQueryEditor.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -32,10 +32,10 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "51258DDB41511AF845CAC52F"
-            BuildableName = "AxorcistQueryApp.app"
-            BlueprintName = "AxorcistQueryApp"
-            ReferencedContainer = "container:AxorcistQueryApp.xcodeproj">
+            BlueprintIdentifier = "389DAA5DBC14EF518A552A09"
+            BuildableName = "OSXQueryEditor.app"
+            BlueprintName = "OSXQueryEditor"
+            ReferencedContainer = "container:OSXQueryEditor.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -57,10 +57,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "51258DDB41511AF845CAC52F"
-            BuildableName = "AxorcistQueryApp.app"
-            BlueprintName = "AxorcistQueryApp"
-            ReferencedContainer = "container:AxorcistQueryApp.xcodeproj">
+            BlueprintIdentifier = "389DAA5DBC14EF518A552A09"
+            BuildableName = "OSXQueryEditor.app"
+            BlueprintName = "OSXQueryEditor"
+            ReferencedContainer = "container:OSXQueryEditor.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <CommandLineArguments>
@@ -76,10 +76,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "51258DDB41511AF845CAC52F"
-            BuildableName = "AxorcistQueryApp.app"
-            BlueprintName = "AxorcistQueryApp"
-            ReferencedContainer = "container:AxorcistQueryApp.xcodeproj">
+            BlueprintIdentifier = "389DAA5DBC14EF518A552A09"
+            BuildableName = "OSXQueryEditor.app"
+            BlueprintName = "OSXQueryEditor"
+            ReferencedContainer = "container:OSXQueryEditor.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <CommandLineArguments>

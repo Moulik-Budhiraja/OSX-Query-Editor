@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct AxorcistQueryApp: App {
+struct OSXQueryEditorApp: App {
     var body: some Scene {
         WindowGroup {
             WorkbenchView()

@@ -122,9 +122,9 @@ enum QueryWorkbenchError: LocalizedError {
         case .invalidMaxDepth:
             return "Max depth must be greater than 0."
         case .selfTargetUnsupported:
-            return "Querying Axorcist Query App itself is not supported. Choose another app."
+            return "Querying OSX Query Editor itself is not supported. Choose another app."
         case .focusedAppUnavailable:
-            return "Focused app resolved to Axorcist Query App. Focus another app first, then run the query."
+            return "Focused app resolved to OSX Query Editor. Focus another app first, then run the query."
         case let .applicationNotFound(identifier):
             return "Could not find a running app for '\(identifier)'."
         case let .elementReferenceUnavailable(reference):
