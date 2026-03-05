@@ -1,16 +1,14 @@
 # OSX Query Editor
 
-Native macOS Xcode app for AXorcist selector query workflow (the same domain as `axorc` interactive selector mode).
+OSX Query Editor is a native macOS app for running AXorcist selector queries against live app accessibility trees and inspecting results in real time.
 
-## Scope
+## Features
 
-This app intentionally focuses on query-language features only:
-
-- Resolve app target by bundle id, app name, PID, or `focused`
-- Run OXQ selector queries
-- Inspect matched results and details
+- Target apps by bundle identifier, app name, PID, or `focused`
+- Run OXQ selector queries with live stats
+- Inspect matched element metadata and hierarchy details
 - Filter results locally
-- Perform interactions on selected result:
+- Run actions on selected elements:
   - `click`
   - `press`
   - `focus`
@@ -18,16 +16,18 @@ This app intentionally focuses on query-language features only:
   - `set-value-submit`
   - `send-keystrokes-submit`
 
+## Screenshot
+
+![OSX Query Editor](docs/osx-query-editor.png)
+
 ## Open In Xcode
 
 ```bash
-cd /Users/moulik/Documents/programming/axorcist-tools
 open OSXQueryEditor.xcodeproj
 ```
 
 ## Build From CLI
 
 ```bash
-cd /Users/moulik/Documents/programming/axorcist-tools
 xcodebuild -project OSXQueryEditor.xcodeproj -scheme OSXQueryEditor -configuration Debug build
 ```
