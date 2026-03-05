@@ -24,6 +24,9 @@ targets:
         INFOPLIST_KEY_NSHumanReadableCopyright: ""
         CODE_SIGN_STYLE: Automatic
         MACOSX_DEPLOYMENT_TARGET: 14.0
+      configs:
+        Release:
+          ENABLE_HARDENED_RUNTIME: YES
     dependencies:
       - package: AXorcist
         product: AXorcist

@@ -11,3 +11,4 @@ build/
 # SwiftPM cache files
 .build/
 .swiftpm/
+dist/
