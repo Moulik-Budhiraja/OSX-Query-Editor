@@ -254,6 +254,15 @@ struct OXAHighlightedEditor: NSViewRepresentable {
                 return
             }
 
+            if !force,
+               self.shouldSuppressAutocompleteAfterSemicolon(
+                   in: textView.string,
+                   cursorUTF16: selectedRange.location)
+            {
+                self.dismissSuggestionPopover()
+                return
+            }
+
             guard let query = self.autocomplete.makeQuery(
                 text: textView.string,
                 cursorUTF16: selectedRange.location)
@@ -351,6 +360,22 @@ struct OXAHighlightedEditor: NSViewRepresentable {
             guard offset >= 0, offset < text.utf16.count else { return nil }
             let index = String.Index(utf16Offset: offset, in: text)
             return text[index]
+        }
+
+        private func shouldSuppressAutocompleteAfterSemicolon(in text: String, cursorUTF16: Int) -> Bool {
+            guard cursorUTF16 > 0, cursorUTF16 <= text.utf16.count else { return false }
+
+            var cursor = String.Index(utf16Offset: cursorUTF16, in: text)
+            while cursor > text.startIndex {
+                let previousIndex = text.index(before: cursor)
+                let character = text[previousIndex]
+                if character.isWhitespace {
+                    cursor = previousIndex
+                    continue
+                }
+                return character == ";"
+            }
+            return false
         }
 
         private func handleAutoClosingInsertion(
