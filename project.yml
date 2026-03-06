@@ -4,7 +4,7 @@ options:
   deploymentTarget:
     macOS: "14.0"
 packages:
-  AXorcist:
+  OSXQuery:
     url: https://github.com/Moulik-Budhiraja/OSX-Query
     branch: main
 targets:
@@ -28,7 +28,7 @@ targets:
         Release:
           ENABLE_HARDENED_RUNTIME: YES
     dependencies:
-      - package: AXorcist
-        product: AXorcist
+      - package: OSXQuery
+        product: OSXQuery
     scheme:
       testTargets: []

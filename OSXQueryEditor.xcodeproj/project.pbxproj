@@ -18,7 +18,7 @@
 		B3BAB3135D13247F59CD861F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A54C952AB444198B6797EA7C /* Assets.xcassets */; };
 		BBA7E7ECA5618272E40C9A8D /* QueryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39AE83D0AD526CA0176913BE /* QueryModels.swift */; };
 		BDA27A67AC03BB56C84B37BE /* OXQColorTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86754DA15F8F3D7A7BCBE2DC /* OXQColorTheme.swift */; };
-		C3407898E89DAD00C5AF72E6 /* AXorcist in Frameworks */ = {isa = PBXBuildFile; productRef = 261678F98491B0C0028AE8DB /* AXorcist */; };
+		C3407898E89DAD00C5AF72E6 /* OSXQuery in Frameworks */ = {isa = PBXBuildFile; productRef = 261678F98491B0C0028AE8DB /* OSXQuery */; };
 		E38FF1CA9A21034B8425D88F /* OXAHighlightedEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F04443441F86B718E48E498 /* OXAHighlightedEditor.swift */; };
 /* End PBXBuildFile section */
 
@@ -43,7 +43,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C3407898E89DAD00C5AF72E6 /* AXorcist in Frameworks */,
+				C3407898E89DAD00C5AF72E6 /* OSXQuery in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -142,7 +142,7 @@
 			);
 			name = OSXQueryEditor;
 			packageProductDependencies = (
-				261678F98491B0C0028AE8DB /* AXorcist */,
+				261678F98491B0C0028AE8DB /* OSXQuery */,
 			);
 			productName = OSXQueryEditor;
 			productReference = A646915C6A9FBBC82B144438 /* OSXQueryEditor.app */;
@@ -418,10 +418,10 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		261678F98491B0C0028AE8DB /* AXorcist */ = {
+		261678F98491B0C0028AE8DB /* OSXQuery */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A9C5D2B724F949F56DD34DF9 /* XCRemoteSwiftPackageReference "OSX-Query" */;
-			productName = AXorcist;
+			productName = OSXQuery;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

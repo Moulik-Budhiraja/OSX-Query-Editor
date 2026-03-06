@@ -1,5 +1,5 @@
 import AppKit
-import AXorcist
+import OSXQuery
 import ApplicationServices
 import Foundation
 

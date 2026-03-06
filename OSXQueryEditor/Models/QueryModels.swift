@@ -1,4 +1,4 @@
-import AXorcist
+import OSXQuery
 import Foundation
 
 enum WorkbenchEditorMode: String, CaseIterable, Identifiable {

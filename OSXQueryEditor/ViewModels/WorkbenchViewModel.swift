@@ -1,4 +1,4 @@
-import AXorcist
+import OSXQuery
 import AppKit
 import Foundation
 
