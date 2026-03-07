@@ -1,6 +1,6 @@
 # OSX Query Editor
 
-OSX Query Editor is a native macOS app for running AXorcist selector queries against live app accessibility trees and inspecting results in real time.
+OSX Query Editor is a native macOS app for running OSXQuery selector queries against live app accessibility trees and inspecting results in real time.
 
 ## Features
 
@@ -20,13 +20,21 @@ OSX Query Editor is a native macOS app for running AXorcist selector queries aga
 
 ![OSX Query Editor](docs/osx-query-editor.png)
 
-## Open In Xcode
+## Download Binary
+
+Download the latest macOS binary from the GitHub Releases page:
+
+[v0.1.0 Release](https://github.com/Moulik-Budhiraja/OSX-Query-Editor/releases/tag/v0.1.0)
+
+## Build From Source (Alternative)
+
+### Open In Xcode
 
 ```bash
 open OSXQueryEditor.xcodeproj
 ```
 
-## Build From CLI
+### Build From CLI
 
 ```bash
 xcodebuild -project OSXQueryEditor.xcodeproj -scheme OSXQueryEditor -configuration Debug build
